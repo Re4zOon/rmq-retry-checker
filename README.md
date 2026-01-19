@@ -410,7 +410,7 @@ fi
 
 Use Windows Task Scheduler to run the script at regular intervals.
 
-## Automation & Scheduling
+## Error Handling
 
 - **Connection Failures**: Script logs error and exits gracefully
 - **Queue Not Found**: Script logs error and exits
