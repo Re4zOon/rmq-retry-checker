@@ -74,11 +74,20 @@ class Config:
         
         Args:
             config_file: Path to YAML configuration file
-        """
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
         
-        if not config_data:
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            yaml.YAMLError: If YAML is invalid
+        """
+        try:
+            with open(config_file, 'r') as f:
+                config_data = yaml.safe_load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found: {config_file}")
+        except yaml.YAMLError as e:
+            raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}")
+        
+        if config_data is None:
             return
         
         # Load RabbitMQ settings
