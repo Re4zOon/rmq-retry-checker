@@ -85,7 +85,8 @@ class Config:
         except FileNotFoundError:
             raise FileNotFoundError(f"Configuration file not found: {config_file}")
         except yaml.YAMLError as e:
-            raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}") from e
+            logger.error("Invalid YAML in configuration file '%s'", config_file, exc_info=e)
+            raise yaml.YAMLError(f"Invalid YAML in configuration file: {config_file}") from e
         
         # Empty YAML files return None - use defaults in this case
         if config_data is None:
@@ -147,6 +148,8 @@ class Config:
         if args.target_queue:
             self.TARGET_QUEUE = args.target_queue
         if args.max_retries is not None:
+            if args.max_retries < 0:
+                raise ValueError(f"max_retries must be non-negative, got: {args.max_retries}")
             self.MAX_RETRY_COUNT = args.max_retries
 
 
@@ -175,6 +178,7 @@ class RMQRetryChecker:
         self.messages_requeued = 0
         self.start_time = None
         self.end_time = None
+        self.success = False  # Track overall success status
         
     def connect(self) -> bool:
         """
@@ -199,13 +203,17 @@ class RMQRetryChecker:
             )
             
             if self.config.RMQ_USE_SSL:
+                # WARNING: Using context=None disables certificate verification
+                # This is insecure and susceptible to man-in-the-middle attacks
+                # For production use, configure proper SSL context with certificate verification
                 ssl_options = pika.SSLOptions(context=None)
                 parameters.ssl_options = ssl_options
             
             self.connection = pika.BlockingConnection(parameters)
             self.channel = self.connection.channel()
             
-            logger.info(f"Connected to RabbitMQ at {self.config.RMQ_HOST}:{self.config.RMQ_PORT}")
+            logger.info("Connected to RabbitMQ")
+            logger.debug(f"RabbitMQ connection details: host={self.config.RMQ_HOST}, port={self.config.RMQ_PORT}, vhost={self.config.RMQ_VHOST}")
             return True
             
         except Exception as e:
@@ -312,10 +320,19 @@ class RMQRetryChecker:
             self.ensure_target_queue_exists()
             
             # Get queue information for logging
-            queue_info = self.channel.queue_declare(
-                queue=self.config.DLQ_NAME,
-                passive=True
-            )
+            try:
+                queue_info = self.channel.queue_declare(
+                    queue=self.config.DLQ_NAME,
+                    passive=True
+                )
+            except pika.exceptions.ChannelClosedByBroker as exc:
+                logger.error(
+                    "Dead Letter Queue '%s' does not exist or cannot be accessed: %s",
+                    self.config.DLQ_NAME,
+                    exc,
+                )
+                raise
+            
             message_count = queue_info.method.message_count
             
             logger.info(f"DLQ '{self.config.DLQ_NAME}' has {message_count} messages")
@@ -367,7 +384,7 @@ class RMQRetryChecker:
             duration = (self.end_time - self.start_time).total_seconds()
         
         return {
-            'status': 'success' if self.messages_processed >= 0 else 'error',
+            'status': 'success' if self.success else 'error',
             'timestamp': datetime.now().isoformat(),
             'config': {
                 'rmq_host': self.config.RMQ_HOST,
@@ -393,7 +410,7 @@ class RMQRetryChecker:
             print("\n" + "=" * 60)
             print("RabbitMQ Retry Checker - Execution Summary")
             print("=" * 60)
-            print(f"Status: {'SUCCESS' if self.messages_processed >= 0 else 'ERROR'}")
+            print(f"Status: {'SUCCESS' if self.success else 'ERROR'}")
             print(f"DLQ: {self.config.DLQ_NAME}")
             print(f"Target Queue: {self.config.TARGET_QUEUE}")
             print(f"Max Retry Count: {self.config.MAX_RETRY_COUNT}")
@@ -418,16 +435,20 @@ class RMQRetryChecker:
         try:
             if not self.connect():
                 logger.error("Failed to connect to RabbitMQ. Exiting.")
+                self.success = False
                 return False
             
             self.check_dlq()
+            self.success = True
             return True
             
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
+            self.success = False
             return False
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
+            self.success = False
             return False
         finally:
             self.end_time = datetime.now()

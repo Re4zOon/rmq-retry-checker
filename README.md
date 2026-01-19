@@ -113,15 +113,15 @@ python rmq_retry_checker.py
 
 | Parameter | CLI Argument | Config File | Environment Variable | Default |
 |-----------|--------------|-------------|---------------------|---------|
-| RabbitMQ Host | `--host` | `[rabbitmq] host` | `RMQ_HOST` | `localhost` |
-| RabbitMQ Port | `--port` | `[rabbitmq] port` | `RMQ_PORT` | `5672` |
-| Username | `--username` | `[rabbitmq] username` | `RMQ_USERNAME` | `guest` |
-| Password | `--password` | `[rabbitmq] password` | `RMQ_PASSWORD` | `guest` |
-| Virtual Host | `--vhost` | `[rabbitmq] vhost` | `RMQ_VHOST` | `/` |
-| Use SSL | `--ssl` | `[rabbitmq] use_ssl` | `RMQ_USE_SSL` | `false` |
-| DLQ Name | `--dlq` | `[queues] dlq_name` | `DLQ_NAME` | `my_dlq` |
-| Target Queue | `--target-queue` | `[queues] target_queue` | `TARGET_QUEUE` | `permanent_failure_queue` |
-| Max Retries | `--max-retries` | `[queues] max_retry_count` | `MAX_RETRY_COUNT` | `3` |
+| RabbitMQ Host | `--host` | `rabbitmq.host` | `RMQ_HOST` | `localhost` |
+| RabbitMQ Port | `--port` | `rabbitmq.port` | `RMQ_PORT` | `5672` |
+| Username | `--username` | `rabbitmq.username` | `RMQ_USERNAME` | `guest` |
+| Password | `--password` | `rabbitmq.password` | `RMQ_PASSWORD` | `guest` |
+| Virtual Host | `--vhost` | `rabbitmq.vhost` | `RMQ_VHOST` | `/` |
+| Use SSL | `--ssl` | `rabbitmq.use_ssl` | `RMQ_USE_SSL` | `false` |
+| DLQ Name | `--dlq` | `queues.dlq_name` | `DLQ_NAME` | `my_dlq` |
+| Target Queue | `--target-queue` | `queues.target_queue` | `TARGET_QUEUE` | `permanent_failure_queue` |
+| Max Retries | `--max-retries` | `queues.max_retry_count` | `MAX_RETRY_COUNT` | `3` |
 
 ## Usage
 
@@ -361,7 +361,7 @@ schtasks /create /tn "RMQ Retry Checker" /tr "python C:\scripts\rmq_retry_checke
 **Dockerfile:**
 ```dockerfile
 FROM python:3.9-slim
-RUN pip install pika python-dotenv
+RUN pip install pika python-dotenv pyyaml
 COPY rmq_retry_checker.py /app/
 WORKDIR /app
 ENTRYPOINT ["python", "rmq_retry_checker.py"]
@@ -407,8 +407,6 @@ if [ "$moved" -gt 10 ]; then
   # Send alert, create ticket, etc.
 fi
 ```
-
-Use Windows Task Scheduler to run the script at regular intervals.
 
 ## Error Handling
 
