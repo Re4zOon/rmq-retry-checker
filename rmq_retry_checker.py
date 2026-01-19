@@ -85,7 +85,7 @@ class Config:
         except FileNotFoundError:
             raise FileNotFoundError(f"Configuration file not found: {config_file}")
         except yaml.YAMLError as e:
-            raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}")
+            raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}") from e
         
         # Empty YAML files return None - use defaults in this case
         if config_data is None:
