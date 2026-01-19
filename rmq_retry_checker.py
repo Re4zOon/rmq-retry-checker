@@ -7,13 +7,31 @@ for infinite retry loops. If a message's x-death count exceeds a threshold,
 it is moved to a permanent failure queue.
 
 Usage:
-    python rmq_retry_checker.py
+    python rmq_retry_checker.py --dlq my_dlq --target-queue permanent_failure_queue --max-retries 3
+    python rmq_retry_checker.py --config /path/to/config.ini
+    python rmq_retry_checker.py --output-format json
 """
 import sys
+import os
 import logging
-import pika
+import argparse
+import json
+import configparser
 from typing import Optional, Dict, Any
-from config import Config
+from datetime import datetime
+
+try:
+    import pika
+except ImportError:
+    print("ERROR: pika library not found. Install with: pip install pika")
+    sys.exit(1)
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    # dotenv is optional
+    load_dotenv = None
+
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +39,80 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+class Config:
+    """Configuration class for RabbitMQ connection and queue settings"""
+    
+    def __init__(self):
+        """Initialize configuration with defaults"""
+        # Load .env file if dotenv is available
+        if load_dotenv:
+            load_dotenv()
+        
+        # RabbitMQ Connection Settings
+        self.RMQ_HOST = os.getenv('RMQ_HOST', 'localhost')
+        self.RMQ_PORT = int(os.getenv('RMQ_PORT', 5672))
+        self.RMQ_USERNAME = os.getenv('RMQ_USERNAME', 'guest')
+        self.RMQ_PASSWORD = os.getenv('RMQ_PASSWORD', 'guest')
+        self.RMQ_VHOST = os.getenv('RMQ_VHOST', '/')
+        self.RMQ_USE_SSL = os.getenv('RMQ_USE_SSL', 'false').lower() == 'true'
+        
+        # Queue Settings
+        self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
+        self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
+        self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', 3))
+    
+    def load_from_file(self, config_file: str):
+        """
+        Load configuration from INI file
+        
+        Args:
+            config_file: Path to configuration file
+        """
+        parser = configparser.ConfigParser()
+        parser.read(config_file)
+        
+        if 'rabbitmq' in parser:
+            rmq = parser['rabbitmq']
+            self.RMQ_HOST = rmq.get('host', self.RMQ_HOST)
+            self.RMQ_PORT = int(rmq.get('port', self.RMQ_PORT))
+            self.RMQ_USERNAME = rmq.get('username', self.RMQ_USERNAME)
+            self.RMQ_PASSWORD = rmq.get('password', self.RMQ_PASSWORD)
+            self.RMQ_VHOST = rmq.get('vhost', self.RMQ_VHOST)
+            self.RMQ_USE_SSL = rmq.get('use_ssl', str(self.RMQ_USE_SSL)).lower() == 'true'
+        
+        if 'queues' in parser:
+            queues = parser['queues']
+            self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
+            self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
+            self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
+    
+    def update_from_args(self, args: argparse.Namespace):
+        """
+        Update configuration from command-line arguments
+        
+        Args:
+            args: Parsed command-line arguments
+        """
+        if args.host:
+            self.RMQ_HOST = args.host
+        if args.port:
+            self.RMQ_PORT = args.port
+        if args.username:
+            self.RMQ_USERNAME = args.username
+        if args.password:
+            self.RMQ_PASSWORD = args.password
+        if args.vhost:
+            self.RMQ_VHOST = args.vhost
+        if args.ssl:
+            self.RMQ_USE_SSL = True
+        if args.dlq:
+            self.DLQ_NAME = args.dlq
+        if args.target_queue:
+            self.TARGET_QUEUE = args.target_queue
+        if args.max_retries is not None:
+            self.MAX_RETRY_COUNT = args.max_retries
 
 
 class RMQRetryChecker:
@@ -31,18 +123,23 @@ class RMQRetryChecker:
     and moves messages exceeding the retry threshold to a permanent failure queue.
     """
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, output_format: str = 'text'):
         """
         Initialize the RMQ Retry Checker
         
         Args:
             config: Configuration object with RabbitMQ connection and queue settings
+            output_format: Output format ('text' or 'json')
         """
         self.config = config
+        self.output_format = output_format
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
         self.messages_processed = 0
         self.messages_moved = 0
+        self.messages_requeued = 0
+        self.start_time = None
+        self.end_time = None
         
     def connect(self) -> bool:
         """
@@ -169,6 +266,7 @@ class RMQRetryChecker:
             # Message hasn't exceeded threshold, requeue it
             logger.info(f"Message retry count ({death_count}) is within limit. Requeuing.")
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            self.messages_requeued += 1
     
     def check_dlq(self):
         """
@@ -206,7 +304,8 @@ class RMQRetryChecker:
                 self.process_message(self.channel, method_frame, properties, body)
             
             logger.info(f"Processing complete. Processed: {self.messages_processed}, "
-                       f"Moved to permanent failure queue: {self.messages_moved}")
+                       f"Moved to permanent failure queue: {self.messages_moved}, "
+                       f"Requeued: {self.messages_requeued}")
             
         except Exception as e:
             logger.error(f"Error checking DLQ: {e}")
@@ -221,10 +320,66 @@ class RMQRetryChecker:
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
     
-    def run(self):
+    def get_result_dict(self) -> Dict[str, Any]:
+        """
+        Get execution results as a dictionary
+        
+        Returns:
+            Dictionary with execution results
+        """
+        duration = None
+        if self.start_time and self.end_time:
+            duration = (self.end_time - self.start_time).total_seconds()
+        
+        return {
+            'status': 'success' if self.messages_processed >= 0 else 'error',
+            'timestamp': datetime.now().isoformat(),
+            'config': {
+                'rmq_host': self.config.RMQ_HOST,
+                'rmq_port': self.config.RMQ_PORT,
+                'dlq_name': self.config.DLQ_NAME,
+                'target_queue': self.config.TARGET_QUEUE,
+                'max_retry_count': self.config.MAX_RETRY_COUNT
+            },
+            'results': {
+                'messages_processed': self.messages_processed,
+                'messages_moved': self.messages_moved,
+                'messages_requeued': self.messages_requeued,
+                'duration_seconds': duration
+            }
+        }
+    
+    def output_results(self):
+        """Output results in the configured format"""
+        if self.output_format == 'json':
+            print(json.dumps(self.get_result_dict(), indent=2))
+        else:
+            # Human-readable text output
+            print("\n" + "=" * 60)
+            print("RabbitMQ Retry Checker - Execution Summary")
+            print("=" * 60)
+            print(f"Status: {'SUCCESS' if self.messages_processed >= 0 else 'ERROR'}")
+            print(f"DLQ: {self.config.DLQ_NAME}")
+            print(f"Target Queue: {self.config.TARGET_QUEUE}")
+            print(f"Max Retry Count: {self.config.MAX_RETRY_COUNT}")
+            print("-" * 60)
+            print(f"Messages Processed: {self.messages_processed}")
+            print(f"Messages Moved to Failure Queue: {self.messages_moved}")
+            print(f"Messages Requeued: {self.messages_requeued}")
+            if self.start_time and self.end_time:
+                duration = (self.end_time - self.start_time).total_seconds()
+                print(f"Duration: {duration:.2f} seconds")
+            print("=" * 60 + "\n")
+    
+    def run(self) -> bool:
         """
         Main execution method
+        
+        Returns:
+            bool: True if successful, False otherwise
         """
+        self.start_time = datetime.now()
+        
         try:
             if not self.connect():
                 logger.error("Failed to connect to RabbitMQ. Exiting.")
@@ -240,17 +395,103 @@ class RMQRetryChecker:
             logger.error(f"Unexpected error: {e}")
             return False
         finally:
+            self.end_time = datetime.now()
             self.close()
+            self.output_results()
+
+
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments
+    
+    Returns:
+        Parsed arguments
+    """
+    parser = argparse.ArgumentParser(
+        description='RabbitMQ DLQ Retry Checker - Detect and handle infinite retry loops',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Using command-line arguments
+  %(prog)s --host localhost --dlq my_dlq --target-queue failed_queue --max-retries 3
+  
+  # Using config file
+  %(prog)s --config /path/to/config.ini
+  
+  # Using .env file (default behavior)
+  %(prog)s
+  
+  # JSON output for automation
+  %(prog)s --output-format json
+  
+Configuration precedence (highest to lowest):
+  1. Command-line arguments
+  2. Config file (--config)
+  3. Environment variables (.env file)
+  4. Default values
+        """
+    )
+    
+    # Connection options
+    conn_group = parser.add_argument_group('RabbitMQ Connection')
+    conn_group.add_argument('--host', help='RabbitMQ host (default: localhost)')
+    conn_group.add_argument('--port', type=int, help='RabbitMQ port (default: 5672)')
+    conn_group.add_argument('--username', help='RabbitMQ username (default: guest)')
+    conn_group.add_argument('--password', help='RabbitMQ password (default: guest)')
+    conn_group.add_argument('--vhost', help='RabbitMQ virtual host (default: /)')
+    conn_group.add_argument('--ssl', action='store_true', help='Use SSL/TLS connection')
+    
+    # Queue options
+    queue_group = parser.add_argument_group('Queue Configuration')
+    queue_group.add_argument('--dlq', help='Dead Letter Queue name (default: my_dlq)')
+    queue_group.add_argument('--target-queue', help='Target queue for failed messages (default: permanent_failure_queue)')
+    queue_group.add_argument('--max-retries', type=int, help='Maximum retry count before moving to target queue (default: 3)')
+    
+    # Config file
+    parser.add_argument('--config', help='Path to INI configuration file')
+    
+    # Output options
+    parser.add_argument('--output-format', choices=['text', 'json'], default='text',
+                       help='Output format: text (human-readable) or json (machine-readable) (default: text)')
+    
+    # Logging options
+    parser.add_argument('--quiet', action='store_true', help='Suppress log output (only show summary)')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
+    
+    return parser.parse_args()
 
 
 def main():
     """Main entry point"""
-    logger.info("Starting RabbitMQ Retry Checker")
-    logger.info(f"Configuration: DLQ='{Config.DLQ_NAME}', "
-               f"Target Queue='{Config.TARGET_QUEUE}', "
-               f"Max Retry Count={Config.MAX_RETRY_COUNT}")
+    args = parse_arguments()
     
-    checker = RMQRetryChecker(Config)
+    # Configure logging level
+    if args.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Load configuration
+    config = Config()
+    
+    # Load from config file if provided
+    if args.config:
+        if not os.path.exists(args.config):
+            logger.error(f"Config file not found: {args.config}")
+            sys.exit(1)
+        logger.info(f"Loading configuration from {args.config}")
+        config.load_from_file(args.config)
+    
+    # Override with command-line arguments
+    config.update_from_args(args)
+    
+    logger.info("Starting RabbitMQ Retry Checker")
+    logger.info(f"Configuration: DLQ='{config.DLQ_NAME}', "
+               f"Target Queue='{config.TARGET_QUEUE}', "
+               f"Max Retry Count={config.MAX_RETRY_COUNT}")
+    
+    # Run checker
+    checker = RMQRetryChecker(config, output_format=args.output_format)
     success = checker.run()
     
     if success:
