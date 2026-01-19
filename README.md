@@ -356,41 +356,6 @@ sudo systemctl start rmq-checker.timer
 schtasks /create /tn "RMQ Retry Checker" /tr "python C:\scripts\rmq_retry_checker.py --output-format json --quiet" /sc minute /mo 5
 ```
 
-### Docker/Kubernetes CronJob
-
-**Dockerfile:**
-```dockerfile
-FROM python:3.9-slim
-RUN pip install pika python-dotenv pyyaml
-COPY rmq_retry_checker.py /app/
-WORKDIR /app
-ENTRYPOINT ["python", "rmq_retry_checker.py"]
-```
-
-**Kubernetes CronJob:**
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: rmq-retry-checker
-spec:
-  schedule: "*/5 * * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: checker
-            image: rmq-retry-checker:latest
-            args: ["--output-format", "json", "--quiet"]
-            env:
-            - name: RMQ_HOST
-              value: "rabbitmq.default.svc.cluster.local"
-            - name: DLQ_NAME
-              value: "my_dlq"
-          restartPolicy: OnFailure
-```
-
 ### CI/CD Integration
 
 The JSON output format makes it easy to integrate with CI/CD pipelines:
