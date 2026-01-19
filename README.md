@@ -20,7 +20,7 @@ This script:
 ## Features
 
 - ✅ **Single-file script** - Easy to deploy in automation environments
-- ✅ **Multiple configuration methods** - Command-line args, config file (.ini), or environment variables (.env)
+- ✅ **Multiple configuration methods** - Command-line args, config file (YAML), or environment variables (.env)
 - ✅ **Human and machine-readable output** - Text format for humans, JSON format for automation
 - ✅ Connects to RabbitMQ (supports quorum queues)
 - ✅ Inspects DLQ messages without removing them
@@ -50,7 +50,7 @@ curl -O https://raw.githubusercontent.com/Re4zOon/rmq-retry-checker/main/rmq_ret
 
 2. Install dependencies:
 ```bash
-pip install pika python-dotenv
+pip install pika python-dotenv pyyaml
 ```
 
 That's it! The script is ready to use.
@@ -65,28 +65,28 @@ The script supports three configuration methods (in order of precedence):
 python rmq_retry_checker.py --host localhost --dlq my_dlq --target-queue failed_queue --max-retries 3
 ```
 
-### 2. Configuration File (.ini format)
+### 2. Configuration File (YAML format)
 
-Create a `config.ini` file:
+Create a `config.yaml` file:
 
-```ini
-[rabbitmq]
-host = localhost
-port = 5672
-username = guest
-password = guest
-vhost = /
-use_ssl = false
+```yaml
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: guest
+  password: guest
+  vhost: /
+  use_ssl: false
 
-[queues]
-dlq_name = my_dlq
-target_queue = permanent_failure_queue
-max_retry_count = 3
+queues:
+  dlq_name: my_dlq
+  target_queue: permanent_failure_queue
+  max_retry_count: 3
 ```
 
 Run with:
 ```bash
-python rmq_retry_checker.py --config config.ini
+python rmq_retry_checker.py --config config.yaml
 ```
 
 ### 3. Environment Variables (.env file)
@@ -135,7 +135,7 @@ python rmq_retry_checker.py
 python rmq_retry_checker.py --dlq my_dlq --max-retries 5
 
 # Using config file
-python rmq_retry_checker.py --config /path/to/config.ini
+python rmq_retry_checker.py --config /path/to/config.yaml
 ```
 
 ### Output Formats
@@ -213,7 +213,7 @@ python rmq_retry_checker.py \
   --output-format json
 
 # Using config file for automation
-python rmq_retry_checker.py --config /etc/rmq-checker/prod.ini --output-format json --quiet
+python rmq_retry_checker.py --config /etc/rmq-checker/prod.yaml --output-format json --quiet
 ```
 
 ### Get Help
@@ -312,7 +312,7 @@ The script is designed to run in automation environments. Use `--output-format j
 */5 * * * * /usr/bin/python3 /path/to/rmq_retry_checker.py --output-format json --quiet >> /var/log/rmq-checker.log 2>&1
 
 # Run every hour with config file
-0 * * * * /usr/bin/python3 /path/to/rmq_retry_checker.py --config /etc/rmq/prod.ini --quiet
+0 * * * * /usr/bin/python3 /path/to/rmq_retry_checker.py --config /etc/rmq/prod.yaml --quiet
 ```
 
 ### Systemd Timer (Linux)
@@ -325,7 +325,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/rmq_retry_checker.py --config /etc/rmq/prod.ini --output-format json --quiet
+ExecStart=/usr/bin/python3 /opt/rmq_retry_checker.py --config /etc/rmq/prod.yaml --output-format json --quiet
 StandardOutput=journal
 StandardError=journal
 ```

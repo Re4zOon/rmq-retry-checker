@@ -8,7 +8,7 @@ it is moved to a permanent failure queue.
 
 Usage:
     python rmq_retry_checker.py --dlq my_dlq --target-queue permanent_failure_queue --max-retries 3
-    python rmq_retry_checker.py --config /path/to/config.ini
+    python rmq_retry_checker.py --config /path/to/config.yaml
     python rmq_retry_checker.py --output-format json
 """
 import sys
@@ -16,7 +16,6 @@ import os
 import logging
 import argparse
 import json
-import configparser
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -24,6 +23,12 @@ try:
     import pika
 except ImportError:
     print("ERROR: pika library not found. Install with: pip install pika")
+    sys.exit(1)
+
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML library not found. Install with: pip install pyyaml")
     sys.exit(1)
 
 try:
@@ -65,25 +70,34 @@ class Config:
     
     def load_from_file(self, config_file: str):
         """
-        Load configuration from INI file
+        Load configuration from YAML file
         
         Args:
-            config_file: Path to configuration file
+            config_file: Path to YAML configuration file
         """
-        parser = configparser.ConfigParser()
-        parser.read(config_file)
+        with open(config_file, 'r') as f:
+            config_data = yaml.safe_load(f)
         
-        if 'rabbitmq' in parser:
-            rmq = parser['rabbitmq']
+        if not config_data:
+            return
+        
+        # Load RabbitMQ settings
+        if 'rabbitmq' in config_data:
+            rmq = config_data['rabbitmq']
             self.RMQ_HOST = rmq.get('host', self.RMQ_HOST)
             self.RMQ_PORT = int(rmq.get('port', self.RMQ_PORT))
             self.RMQ_USERNAME = rmq.get('username', self.RMQ_USERNAME)
             self.RMQ_PASSWORD = rmq.get('password', self.RMQ_PASSWORD)
             self.RMQ_VHOST = rmq.get('vhost', self.RMQ_VHOST)
-            self.RMQ_USE_SSL = rmq.get('use_ssl', str(self.RMQ_USE_SSL)).lower() == 'true'
+            use_ssl = rmq.get('use_ssl', self.RMQ_USE_SSL)
+            if isinstance(use_ssl, bool):
+                self.RMQ_USE_SSL = use_ssl
+            else:
+                self.RMQ_USE_SSL = str(use_ssl).lower() == 'true'
         
-        if 'queues' in parser:
-            queues = parser['queues']
+        # Load queue settings
+        if 'queues' in config_data:
+            queues = config_data['queues']
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
             self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
@@ -416,7 +430,7 @@ Examples:
   %(prog)s --host localhost --dlq my_dlq --target-queue failed_queue --max-retries 3
   
   # Using config file
-  %(prog)s --config /path/to/config.ini
+  %(prog)s --config /path/to/config.yaml
   
   # Using .env file (default behavior)
   %(prog)s
@@ -448,7 +462,7 @@ Configuration precedence (highest to lowest):
     queue_group.add_argument('--max-retries', type=int, help='Maximum retry count before moving to target queue (default: 3)')
     
     # Config file
-    parser.add_argument('--config', help='Path to INI configuration file')
+    parser.add_argument('--config', help='Path to YAML configuration file')
     
     # Output options
     parser.add_argument('--output-format', choices=['text', 'json'], default='text',
