@@ -265,7 +265,7 @@ Duration: 0.45 seconds
 ============================================================
 ```
 
-## How It Works
+## How It Works: x-death Header
 
 ### x-death Header
 
