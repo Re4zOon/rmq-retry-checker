@@ -178,7 +178,7 @@ class RMQRetryChecker:
             # Ensure target queue exists
             self.ensure_target_queue_exists()
             
-            # Get queue information
+            # Get queue information for logging
             queue_info = self.channel.queue_declare(
                 queue=self.config.DLQ_NAME,
                 passive=True
@@ -191,18 +191,19 @@ class RMQRetryChecker:
                 logger.info("No messages to process")
                 return
             
-            # Process messages one by one
-            for message in range(message_count):
+            # Process messages until queue is empty
+            # Don't rely on message_count as it can change during processing
+            while True:
                 method_frame, properties, body = self.channel.basic_get(
                     queue=self.config.DLQ_NAME,
                     auto_ack=False
                 )
                 
-                if method_frame:
-                    self.process_message(self.channel, method_frame, properties, body)
-                else:
+                if method_frame is None:
                     # No more messages
                     break
+                    
+                self.process_message(self.channel, method_frame, properties, body)
             
             logger.info(f"Processing complete. Processed: {self.messages_processed}, "
                        f"Moved to permanent failure queue: {self.messages_moved}")

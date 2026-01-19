@@ -16,7 +16,7 @@ class TestRMQRetryChecker(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures"""
-        self.config = Config()
+        self.config = Config
         self.checker = RMQRetryChecker(self.config)
     
     def test_initialization(self):
