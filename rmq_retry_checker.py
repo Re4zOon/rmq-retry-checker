@@ -87,6 +87,7 @@ class Config:
         except yaml.YAMLError as e:
             raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}")
         
+        # Empty YAML files return None - use defaults in this case
         if config_data is None:
             return
         
@@ -98,11 +99,7 @@ class Config:
             self.RMQ_USERNAME = rmq.get('username', self.RMQ_USERNAME)
             self.RMQ_PASSWORD = rmq.get('password', self.RMQ_PASSWORD)
             self.RMQ_VHOST = rmq.get('vhost', self.RMQ_VHOST)
-            use_ssl = rmq.get('use_ssl', self.RMQ_USE_SSL)
-            if isinstance(use_ssl, bool):
-                self.RMQ_USE_SSL = use_ssl
-            else:
-                self.RMQ_USE_SSL = str(use_ssl).lower() == 'true'
+            self.RMQ_USE_SSL = self._parse_bool(rmq.get('use_ssl', self.RMQ_USE_SSL))
         
         # Load queue settings
         if 'queues' in config_data:
@@ -110,6 +107,21 @@ class Config:
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
             self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
+    
+    @staticmethod
+    def _parse_bool(value) -> bool:
+        """
+        Parse a value as a boolean
+        
+        Args:
+            value: Value to parse (bool, str, or other)
+        
+        Returns:
+            Boolean value
+        """
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() == 'true'
     
     def update_from_args(self, args: argparse.Namespace):
         """
