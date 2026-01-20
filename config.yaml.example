@@ -1,0 +1,15 @@
+# RabbitMQ Retry Checker Configuration File
+# This is a YAML format configuration file
+
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: guest
+  password: guest
+  vhost: /
+  use_ssl: false
+
+queues:
+  dlq_name: my_dlq
+  target_queue: permanent_failure_queue
+  max_retry_count: 3
