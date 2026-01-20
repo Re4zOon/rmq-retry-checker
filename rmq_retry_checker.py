@@ -33,10 +33,36 @@ stats = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
 queue_stats = {}
 
 
+def reset_state():
+    """Reset global mutable state (primarily intended for testing)."""
+    global config, connection, channel, processed_ids, stats, queue_stats
+    config = {}
+    connection = None
+    channel = None
+    processed_ids = set()
+    stats = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
+    queue_stats = {}
+
+
+def has_wildcard(pattern):
+    """Check if a pattern contains wildcard characters."""
+    return '*' in pattern or '?' in pattern
+
+
 def load_config(config_file):
     """Load configuration from YAML file."""
-    with open(config_file, 'r', encoding='utf-8') as f:
-        data = yaml.safe_load(f) or {}
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logger.error("Configuration file '%s' not found.", config_file)
+        sys.exit(1)
+    except PermissionError:
+        logger.error("Permission denied when reading configuration file '%s'.", config_file)
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        logger.error("Invalid YAML syntax in configuration file '%s': %s", config_file, e)
+        sys.exit(1)
     
     rmq = data.get('rabbitmq', {})
     queues = data.get('queues', {})
@@ -62,6 +88,15 @@ def load_config(config_file):
         cfg['use_ssl'] = cfg['use_ssl'].lower() == 'true'
     if isinstance(cfg['ssl_verify'], str):
         cfg['ssl_verify'] = cfg['ssl_verify'].lower() == 'true'
+
+    # Validate that critical configuration values are explicitly provided.
+    missing_critical = [key for key in ('host', 'username', 'password') if key not in rmq]
+    if missing_critical:
+        logger.warning(
+            "Missing critical RabbitMQ configuration keys in YAML: %s. "
+            "Using default values; consider specifying them explicitly.",
+            ", ".join(missing_critical),
+        )
     
     return cfg
 
@@ -195,8 +230,7 @@ def get_queue_pairs():
     dlq = config['dlq_name']
     target = config['target_queue']
     
-    has_wc = lambda p: '*' in p or '?' in p
-    if not has_wc(dlq) and not has_wc(target):
+    if not has_wildcard(dlq) and not has_wildcard(target):
         return [(dlq, target)]
     
     logger.info("Wildcard detected, querying Management API")
@@ -211,15 +245,37 @@ def get_queue_pairs():
     
     pairs = []
     for dlq_name in matches:
-        if has_wc(target):
+        if has_wildcard(target):
             # Derive target from DLQ name
             regex = re.escape(dlq).replace(r'\*', '(.*?)').replace(r'\?', '(.)')
             m = re.match(f'^{regex}$', dlq_name)
             if m:
-                parts = iter(m.groups())
-                tgt = re.sub(r'[*?]', lambda _: next(parts), target)
+                groups = m.groups()
+                wildcard_count = len(re.findall(r'[*?]', target))
+                if wildcard_count != len(groups):
+                    logger.error(
+                        "Mismatched wildcard/group count when deriving target queue "
+                        "from DLQ name. dlq_pattern=%r target_pattern=%r dlq_name=%r "
+                        "wildcards=%d groups=%d",
+                        dlq, target, dlq_name, wildcard_count, len(groups),
+                    )
+                    # Fallback to using the target pattern as-is to avoid crashing.
+                    tgt = target
+                else:
+                    parts = iter(groups)
+                    tgt = re.sub(r'[*?]', lambda _: next(parts), target)
             else:
-                tgt = target
+                logger.error(
+                    "Failed to resolve wildcard target pattern '%s' for DLQ '%s' "
+                    "using regex '%s'.",
+                    target,
+                    dlq_name,
+                    regex,
+                )
+                raise ValueError(
+                    f"Cannot resolve wildcard target pattern '{target}' "
+                    f"from DLQ '{dlq_name}' with pattern '{dlq}'."
+                )
         else:
             tgt = target
         pairs.append((dlq_name, tgt))
@@ -362,9 +418,6 @@ def main():
         sys.exit(1)
     
     config_file = sys.argv[1]
-    if not os.path.exists(config_file):
-        print(f"Config file not found: {config_file}", file=sys.stderr)
-        sys.exit(1)
     
     logger.info(f"Loading config from {config_file}")
     config = load_config(config_file)
