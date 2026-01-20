@@ -244,6 +244,9 @@ def get_queue_pairs():
     logger.info(f"Found {len(matches)} DLQ(s)")
     
     pairs = []
+    # Pre-calculate wildcard count for target pattern
+    target_wildcard_count = target.count('*') + target.count('?')
+    
     for dlq_name in matches:
         if has_wildcard(target):
             # Derive target from DLQ name
@@ -251,16 +254,15 @@ def get_queue_pairs():
             m = re.match(f'^{regex}$', dlq_name)
             if m:
                 groups = m.groups()
-                wildcard_count = len(re.findall(r'[*?]', target))
-                if wildcard_count != len(groups):
+                if target_wildcard_count != len(groups):
                     logger.error(
                         "Mismatched wildcard/group count when deriving target queue "
                         "from DLQ name. dlq_pattern=%r target_pattern=%r dlq_name=%r "
                         "wildcards=%d groups=%d",
-                        dlq, target, dlq_name, wildcard_count, len(groups),
+                        dlq, target, dlq_name, target_wildcard_count, len(groups),
                     )
-                    # Fallback to using the target pattern as-is to avoid crashing.
-                    tgt = target
+                    # Skip this DLQ to avoid creating invalid queue names
+                    continue
                 else:
                     parts = iter(groups)
                     tgt = re.sub(r'[*?]', lambda _: next(parts), target)
