@@ -236,15 +236,15 @@ class RMQRetryChecker:
         mgmt_port = self.config.RMQ_MGMT_PORT
         protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
         
-        # Validate and sanitize host to prevent URL injection
-        # Remove any invalid characters that could be used for injection
-        safe_host = self.config.RMQ_HOST.replace('/', '').replace('\\', '').replace('@', '')
-        if not safe_host or safe_host != self.config.RMQ_HOST:
-            raise ValueError(f"Invalid host value: {self.config.RMQ_HOST}")
+        # Validate host is a proper hostname or IP address
+        # Hostname can contain alphanumeric, dots, hyphens, and underscores
+        host = self.config.RMQ_HOST
+        if not re.match(r'^[a-zA-Z0-9._-]+$', host):
+            raise ValueError(f"Invalid RMQ_HOST value. Host must be a valid hostname or IP address.")
         
         # URL encode the vhost (/ becomes %2F)
         vhost_encoded = urllib.parse.quote(self.config.RMQ_VHOST, safe='')
-        url = f"{protocol}://{safe_host}:{mgmt_port}/api/queues/{vhost_encoded}"
+        url = f"{protocol}://{host}:{mgmt_port}/api/queues/{vhost_encoded}"
         
         try:
             # Create request with basic auth
@@ -273,10 +273,12 @@ class RMQRetryChecker:
             
         except Exception as e:
             logger.error(f"Failed to list queues from Management API: {e}")
+            # Don't expose full URL in error message to avoid leaking sensitive info
             raise Exception(
-                f"Unable to list queues from Management API. "
-                f"Ensure RabbitMQ Management plugin is enabled and accessible at {url}. "
-                f"Error: {e}"
+                f"Unable to list queues from RabbitMQ Management API. "
+                f"Ensure the Management plugin is enabled and accessible. "
+                f"Check host={host}, port={mgmt_port}, vhost={self.config.RMQ_VHOST}. "
+                f"Error: {type(e).__name__}"
             ) from e
     
     def get_matching_queue_pairs(self) -> List[Tuple[str, str]]:
@@ -376,16 +378,15 @@ class RMQRetryChecker:
         # Get captured groups (the parts that matched wildcards)
         captured_parts = list(match.groups())
         
-        # Replace wildcards in target_pattern with captured parts using re.sub
-        part_index = [0]  # Use list to allow modification in nested function
+        # Create an iterator for captured parts
+        import itertools
+        parts_iter = iter(captured_parts)
         
         def replace_wildcard(match_obj):
             """Replace wildcard with next captured part"""
-            if part_index[0] < len(captured_parts):
-                replacement = captured_parts[part_index[0]]
-                part_index[0] += 1
-                return replacement
-            else:
+            try:
+                return next(parts_iter)
+            except StopIteration:
                 # Not enough captured parts - this shouldn't happen if patterns are consistent
                 raise ValueError(
                     f"Pattern mismatch: target pattern '{target_pattern}' has more wildcards "
