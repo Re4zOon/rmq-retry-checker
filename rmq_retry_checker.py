@@ -141,9 +141,9 @@ class RMQRetryChecker:
     
     def _get_message_fingerprint(self, properties, body: bytes) -> str:
         """Generate a unique fingerprint for a message using message_id or body hash."""
-        if properties.message_id:
+        if properties and getattr(properties, "message_id", None):
             return f"id:{properties.message_id}"
-        # Fallback to body hash if no message_id
+        # Fallback to body hash if no message_id or no properties
         body_hash = hashlib.sha256(body).hexdigest()
         return f"hash:{body_hash}"
     
