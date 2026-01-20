@@ -155,13 +155,19 @@ queues:
 **Examples:**
 
 ```bash
+# Process DLQs with dot notation (dlq.queue1 -> dead.queue1)
+python rmq_retry_checker.py --dlq "dlq.*" --target-queue "dead.*"
+
 # Process all service DLQs with matching target queues
 python rmq_retry_checker.py --dlq "service_*_dlq" --target-queue "service_*_failed"
 
 # Process all DLQs ending with '_retry' and send to a single failure queue
 python rmq_retry_checker.py --dlq "*_retry" --target-queue "all_failures"
 
-# Using config file
+# Using config file for dlq.* -> dead.* pattern
+python rmq_retry_checker.py --config config_dlq_dead_example.yaml
+
+# Using config file with custom patterns
 cat > config.yaml << EOF
 rabbitmq:
   host: localhost
@@ -182,6 +188,8 @@ python rmq_retry_checker.py --config config.yaml
 
 | DLQ Pattern | Target Pattern | Matched DLQ | Derived Target |
 |-------------|----------------|-------------|----------------|
+| `dlq.*` | `dead.*` | `dlq.queue1` | `dead.queue1` |
+| `dlq.*` | `dead.*` | `dlq.payments` | `dead.payments` |
 | `service_*_dlq` | `service_*_failed` | `service_auth_dlq` | `service_auth_failed` |
 | `*_retry` | `*_dead` | `orders_retry` | `orders_dead` |
 | `app_*_dlq` | `failures` | `app_payments_dlq` | `failures` |
@@ -443,6 +451,50 @@ fi
 - **Queue Not Found**: Script logs error and exits
 - **Message Processing Errors**: Failed messages are NACKed and requeued
 - **Interrupted Execution**: Proper cleanup and connection closure
+
+## Testing & Verification
+
+The repository includes comprehensive tests to verify wildcard functionality:
+
+### Running Tests
+
+```bash
+# Run wildcard functionality tests
+python3 test_wildcard.py
+
+# Run wildcard demonstration script
+python3 demo_wildcard.py
+```
+
+### Test Coverage
+
+The test suite (`test_wildcard.py`) includes 14 test cases covering:
+- Wildcard detection in patterns
+- Simple wildcard patterns (`*_dlq` -> `*_failed`)
+- Dot-separated patterns (`dlq.*` -> `dead.*`)
+- Multiple wildcards (`*_dlq_*` -> `*_failed_*`)
+- Question mark wildcards (`dlq_?` -> `dead_?`)
+- Complex patterns with multiple wildcards
+- Edge cases with special characters
+- Queue pair matching with and without wildcards
+
+### Example Configurations
+
+The repository includes example configuration files:
+
+- `config.yaml.example` - General configuration template
+- `config_dlq_dead_example.yaml` - Specific example for `dlq.*` -> `dead.*` pattern
+
+### Verified Wildcard Patterns
+
+The following wildcard setup has been tested and verified:
+
+**Pattern**: `dlq.*` -> `dead.*`
+
+This correctly handles queues where:
+- DLQs are named: `dlq.queue1`, `dlq.queue2`, `dlq.payments`, etc.
+- Target queues: `dead.queue1`, `dead.queue2`, `dead.payments`, etc.
+- The queue name portion always remains the same between DLQ and target
 
 ## Contributing
 
