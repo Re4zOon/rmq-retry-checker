@@ -69,12 +69,8 @@ class Config:
         max_retry_raw = os.getenv('MAX_RETRY_COUNT', '3')
         try:
             self.MAX_RETRY_COUNT = int(max_retry_raw)
-            if self.MAX_RETRY_COUNT < 0:
-                raise ValueError(f"MAX_RETRY_COUNT must be non-negative, got: {self.MAX_RETRY_COUNT}")
         except ValueError as e:
-            if "invalid literal" in str(e).lower():
-                raise ValueError(f"Invalid MAX_RETRY_COUNT value: {max_retry_raw!r}. Must be an integer.") from e
-            raise
+            raise ValueError(f"Invalid MAX_RETRY_COUNT value: {max_retry_raw!r}. Must be an integer.") from e
     
     def validate(self):
         """
@@ -127,10 +123,7 @@ class Config:
             queues = config_data['queues']
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
-            max_retry_count = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
-            if max_retry_count < 0:
-                raise ValueError(f"max_retry_count in YAML must be non-negative, got: {max_retry_count}")
-            self.MAX_RETRY_COUNT = max_retry_count
+            self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
     
     @staticmethod
     def _parse_bool(value) -> bool:
@@ -171,8 +164,6 @@ class Config:
         if args.target_queue:
             self.TARGET_QUEUE = args.target_queue
         if args.max_retries is not None:
-            if args.max_retries < 0:
-                raise ValueError(f"max_retries must be non-negative, got: {args.max_retries}")
             self.MAX_RETRY_COUNT = args.max_retries
 
 
