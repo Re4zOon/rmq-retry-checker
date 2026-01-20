@@ -83,12 +83,10 @@ class Config:
         Raises:
             ValueError: If configuration is invalid
         """
-        if not self.DLQ_NAME or not isinstance(self.DLQ_NAME, str):
+        if not self.DLQ_NAME or not self.DLQ_NAME.strip():
             raise ValueError("DLQ_NAME must be a non-empty string")
-        if not self.TARGET_QUEUE or not isinstance(self.TARGET_QUEUE, str):
+        if not self.TARGET_QUEUE or not self.TARGET_QUEUE.strip():
             raise ValueError("TARGET_QUEUE must be a non-empty string")
-        if self.MAX_RETRY_COUNT < 0:
-            raise ValueError(f"MAX_RETRY_COUNT must be non-negative, got: {self.MAX_RETRY_COUNT}")
     
     def load_from_file(self, config_file: str):
         """
@@ -259,7 +257,8 @@ class RMQRetryChecker:
             logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready (quorum queue)")
         except Exception as e:
             # Fall back to classic durable queue if quorum queues not supported
-            logger.warning(f"Failed to declare quorum queue, trying classic queue: {e}")
+            logger.debug(f"Quorum queue not supported, trying classic queue: {e}")
+            logger.warning("Quorum queues not supported, using classic durable queue instead")
             try:
                 self.channel.queue_declare(
                     queue=self.config.TARGET_QUEUE,
