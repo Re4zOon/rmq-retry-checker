@@ -272,22 +272,15 @@ class RMQRetryChecker:
         if death_count > self.config.MAX_RETRY_COUNT:
             logger.warning(f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}), moving to {target_queue}")
             try:
-                # Ensure message persistence with delivery_mode=2
-                persistent_properties = pika.BasicProperties(
-                    delivery_mode=2,  # persistent
-                    content_type=properties.content_type,
-                    content_encoding=properties.content_encoding,
-                    headers=properties.headers,
-                    priority=properties.priority,
-                    correlation_id=properties.correlation_id,
-                    reply_to=properties.reply_to,
-                    expiration=properties.expiration,
-                    message_id=properties.message_id,
-                    timestamp=properties.timestamp,
-                    type=properties.type,
-                    user_id=properties.user_id,
-                    app_id=properties.app_id,
-                )
+                # Copy properties and ensure persistence with delivery_mode=2
+                props_dict = {
+                    attr: getattr(properties, attr)
+                    for attr in ['content_type', 'content_encoding', 'headers', 'priority',
+                                 'correlation_id', 'reply_to', 'expiration', 'message_id',
+                                 'timestamp', 'type', 'user_id', 'app_id', 'cluster_id']
+                }
+                props_dict['delivery_mode'] = 2  # persistent
+                persistent_properties = pika.BasicProperties(**props_dict)
                 # With confirm_delivery enabled, basic_publish blocks until broker confirms
                 # mandatory=True ensures the message is routed to a queue
                 self.channel.basic_publish(
