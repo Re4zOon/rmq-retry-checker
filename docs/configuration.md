@@ -26,6 +26,7 @@ queues:
   target_queue: permanent_failure_queue   # Supports wildcards: dead.*
   max_retry_count: 3
   dedup_file: .rmq_processed_ids          # File to track processed messages
+  dedup_max_age_days: 7                   # Auto-cleanup entries older than N days
 ```
 
 ## Environment Variables
@@ -46,6 +47,7 @@ Create a `.env` file or export variables:
 | `TARGET_QUEUE` | permanent_failure_queue | Target queue or pattern |
 | `MAX_RETRY_COUNT` | 3 | Retry threshold |
 | `DEDUP_FILE` | .rmq_processed_ids | File to track processed message IDs |
+| `DEDUP_MAX_AGE_DAYS` | 7 | Days to keep dedup entries before cleanup |
 
 ## Command-Line Options
 
@@ -64,6 +66,7 @@ Create a `.env` file or export variables:
 | `--target-queue` | Target queue for failed messages |
 | `--max-retries` | Max retry count |
 | `--dedup-file` | File to store processed message IDs |
+| `--dedup-max-age` | Days to keep dedup entries (default: 7) |
 | `--output-format` | `text` or `json` |
 | `--quiet` | Suppress logs |
 | `--verbose` | Verbose logging |
