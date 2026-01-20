@@ -28,7 +28,7 @@ python rmq_retry_checker.py --dlq my_dlq --target-queue failed_queue --max-retri
 
 ## Configuration
 
-Create `config.yaml`:
+Create `config.yaml` (minimal example):
 
 ```yaml
 rabbitmq:
@@ -36,10 +36,13 @@ rabbitmq:
   port: 5672
   username: guest
   password: guest
+  # vhost: /              # Optional, defaults to /
+  # use_ssl: false        # Optional, enable for TLS
+  # ssl_verify: true      # Optional, set false for self-signed certs
 
 queues:
-  dlq_name: my_dlq           # Supports wildcards: dlq.*
-  target_queue: failed_queue  # Supports wildcards: dead.*
+  dlq_name: my_dlq                        # Supports wildcards: dlq.*
+  target_queue: permanent_failure_queue   # Supports wildcards: dead.*
   max_retry_count: 3
 ```
 

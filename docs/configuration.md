@@ -22,8 +22,8 @@ rabbitmq:
   ssl_verify: true    # Set false for self-signed certs
 
 queues:
-  dlq_name: my_dlq              # Supports wildcards: dlq.*
-  target_queue: failed_queue    # Supports wildcards: dead.*
+  dlq_name: my_dlq                        # Supports wildcards: dlq.*
+  target_queue: permanent_failure_queue   # Supports wildcards: dead.*
   max_retry_count: 3
 ```
 

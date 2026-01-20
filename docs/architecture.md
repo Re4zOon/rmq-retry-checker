@@ -13,11 +13,12 @@ flowchart TD
     A[Message Published] --> B[Main Queue]
     B -->|Processing Fails| C[Dead Letter Queue]
     C --> D{Retry Checker}
-    D -->|x-death count ≤ max| E[Requeue to DLQ]
-    D -->|x-death count > max| F[Permanent Failure Queue]
-    E -->|Retry| C
+    D -->|x-death count ≤ max| E[Leave in DLQ]
+    D -->|x-death count > max| F[permanent_failure_queue]
     F --> G[Manual Review]
 ```
+
+> **Note:** Messages within the retry limit are left in the DLQ (via nack with requeue). The retry mechanism depends on your RabbitMQ setup—typically the DLQ is configured to dead-letter back to the main queue after a TTL, allowing the consumer to retry processing.
 
 ## Processing Logic
 
