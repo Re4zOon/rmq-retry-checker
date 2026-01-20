@@ -101,7 +101,7 @@ class Config:
             self.RMQ_VHOST = args.vhost
         if args.ssl:
             self.RMQ_USE_SSL = True
-        if hasattr(args, 'no_ssl_verify') and args.no_ssl_verify:
+        if args.no_ssl_verify:
             self.RMQ_SSL_VERIFY = False
         if args.dlq:
             self.DLQ_NAME = args.dlq
@@ -221,10 +221,8 @@ class RMQRetryChecker:
             )
             
             if self.config.RMQ_USE_SSL:
-                if self.config.RMQ_SSL_VERIFY:
-                    ssl_context = ssl.create_default_context()
-                else:
-                    ssl_context = ssl.create_default_context()
+                ssl_context = ssl.create_default_context()
+                if not self.config.RMQ_SSL_VERIFY:
                     ssl_context.check_hostname = False
                     ssl_context.verify_mode = ssl.CERT_NONE
                 parameters.ssl_options = pika.SSLOptions(context=ssl_context)
