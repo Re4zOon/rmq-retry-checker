@@ -55,7 +55,7 @@ class Config:
         self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
         self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', '3'))
         self.DEDUP_FILE = os.getenv('DEDUP_FILE', '.rmq_processed_ids')
-        self.DEDUP_MAX_AGE_DAYS = int(os.getenv('DEDUP_MAX_AGE_DAYS', '7'))
+        self.DEDUP_MAX_AGE_HOURS = int(os.getenv('DEDUP_MAX_AGE_HOURS', '168'))
     
     @staticmethod
     def has_wildcard(pattern: str) -> bool:
@@ -89,7 +89,7 @@ class Config:
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
             self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
             self.DEDUP_FILE = queues.get('dedup_file', self.DEDUP_FILE)
-            self.DEDUP_MAX_AGE_DAYS = int(queues.get('dedup_max_age_days', self.DEDUP_MAX_AGE_DAYS))
+            self.DEDUP_MAX_AGE_HOURS = int(queues.get('dedup_max_age_hours', self.DEDUP_MAX_AGE_HOURS))
     
     def update_from_args(self, args: argparse.Namespace):
         if args.host:
@@ -116,8 +116,8 @@ class Config:
             self.MAX_RETRY_COUNT = args.max_retries
         if args.dedup_file:
             self.DEDUP_FILE = args.dedup_file
-        if args.dedup_max_age is not None:
-            self.DEDUP_MAX_AGE_DAYS = args.dedup_max_age
+        if args.dedup_max_age_hours is not None:
+            self.DEDUP_MAX_AGE_HOURS = args.dedup_max_age_hours
 
 
 class RMQRetryChecker:
@@ -154,7 +154,7 @@ class RMQRetryChecker:
             return
         
         try:
-            cutoff_time = datetime.now() - timedelta(days=self.config.DEDUP_MAX_AGE_DAYS)
+            cutoff_time = datetime.now() - timedelta(hours=self.config.DEDUP_MAX_AGE_HOURS)
             valid_entries = []
             total_entries = 0
             
@@ -527,7 +527,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--target-queue', help='Target queue for failed messages')
     parser.add_argument('--max-retries', type=int, help='Max retry count')
     parser.add_argument('--dedup-file', dest='dedup_file', help='File to store processed message IDs for deduplication')
-    parser.add_argument('--dedup-max-age', type=int, dest='dedup_max_age', help='Max age in days for dedup entries (default: 7)')
+    parser.add_argument('--dedup-max-age-hours', type=int, dest='dedup_max_age_hours', help='Max age in hours for dedup entries (default: 168)')
     parser.add_argument('--config', help='Path to YAML config file')
     parser.add_argument('--output-format', choices=['text', 'json'], default='text', help='Output format')
     parser.add_argument('--quiet', action='store_true', help='Suppress log output')
