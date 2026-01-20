@@ -144,7 +144,7 @@ class RMQRetryChecker:
         if properties.message_id:
             return f"id:{properties.message_id}"
         # Fallback to body hash if no message_id
-        body_hash = hashlib.sha256(body).hexdigest()[:32]
+        body_hash = hashlib.sha256(body).hexdigest()
         return f"hash:{body_hash}"
     
     def _load_processed_ids(self):
