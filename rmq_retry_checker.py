@@ -16,7 +16,9 @@ import os
 import logging
 import argparse
 import json
-from typing import Optional, Dict, Any
+import fnmatch
+import re
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 
 try:
@@ -36,6 +38,14 @@ try:
 except ImportError:
     # dotenv is optional
     load_dotenv = None
+
+try:
+    import urllib.request
+    import urllib.parse
+    import base64
+except ImportError:
+    # These should be available in standard library
+    pass
 
 
 # Configure logging
@@ -71,6 +81,19 @@ class Config:
             self.MAX_RETRY_COUNT = int(max_retry_raw)
         except ValueError as e:
             raise ValueError(f"Invalid MAX_RETRY_COUNT value: {max_retry_raw!r}. Must be an integer.") from e
+    
+    @staticmethod
+    def has_wildcard(pattern: str) -> bool:
+        """
+        Check if a string contains wildcard characters
+        
+        Args:
+            pattern: String to check for wildcards
+            
+        Returns:
+            bool: True if pattern contains * or ?, False otherwise
+        """
+        return '*' in pattern or '?' in pattern
     
     def validate(self):
         """
@@ -193,6 +216,143 @@ class RMQRetryChecker:
         self.start_time = None
         self.end_time = None
         self.success = False  # Track overall success status
+        self.queue_stats: Dict[str, Dict[str, int]] = {}  # Per-queue statistics
+    
+    def list_queues_from_api(self) -> List[str]:
+        """
+        List all queues from RabbitMQ Management API
+        
+        Returns:
+            List of queue names
+            
+        Raises:
+            Exception: If unable to connect to Management API
+        """
+        # RabbitMQ Management API typically runs on port 15672
+        mgmt_port = 15672
+        protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
+        
+        # URL encode the vhost (/ becomes %2F)
+        vhost_encoded = urllib.parse.quote(self.config.RMQ_VHOST, safe='')
+        url = f"{protocol}://{self.config.RMQ_HOST}:{mgmt_port}/api/queues/{vhost_encoded}"
+        
+        try:
+            # Create request with basic auth
+            auth_string = f"{self.config.RMQ_USERNAME}:{self.config.RMQ_PASSWORD}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            request = urllib.request.Request(url)
+            request.add_header('Authorization', f'Basic {auth_b64}')
+            
+            # Make request
+            with urllib.request.urlopen(request, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                
+            # Extract queue names
+            queue_names = [q['name'] for q in data if 'name' in q]
+            logger.debug(f"Found {len(queue_names)} queues via Management API")
+            return queue_names
+            
+        except Exception as e:
+            logger.error(f"Failed to list queues from Management API: {e}")
+            raise Exception(
+                f"Unable to list queues from Management API. "
+                f"Ensure RabbitMQ Management plugin is enabled and accessible at {url}. "
+                f"Error: {e}"
+            ) from e
+    
+    def get_matching_queue_pairs(self) -> List[Tuple[str, str]]:
+        """
+        Get list of (dlq_name, target_queue) pairs based on configuration.
+        Supports wildcard patterns in queue names.
+        
+        Returns:
+            List of tuples (dlq_name, target_queue_name)
+        """
+        dlq_pattern = self.config.DLQ_NAME
+        target_pattern = self.config.TARGET_QUEUE
+        
+        # Check if patterns contain wildcards
+        dlq_has_wildcard = Config.has_wildcard(dlq_pattern)
+        target_has_wildcard = Config.has_wildcard(target_pattern)
+        
+        if not dlq_has_wildcard and not target_has_wildcard:
+            # No wildcards, return single pair
+            return [(dlq_pattern, target_pattern)]
+        
+        # Wildcards present, need to list queues and match
+        logger.info("Wildcard pattern detected, querying RabbitMQ Management API for queue list")
+        all_queues = self.list_queues_from_api()
+        
+        # Match DLQ pattern
+        matching_dlqs = [q for q in all_queues if fnmatch.fnmatch(q, dlq_pattern)]
+        
+        if not matching_dlqs:
+            logger.warning(f"No queues found matching DLQ pattern: {dlq_pattern}")
+            return []
+        
+        logger.info(f"Found {len(matching_dlqs)} DLQ(s) matching pattern '{dlq_pattern}': {matching_dlqs}")
+        
+        # Build queue pairs
+        queue_pairs = []
+        
+        for dlq_name in matching_dlqs:
+            if target_has_wildcard:
+                # Derive target queue name from DLQ name
+                # Strategy: replace the wildcard portion in the target pattern
+                # with the corresponding portion from the DLQ name
+                target_queue = self._derive_target_queue(dlq_name, dlq_pattern, target_pattern)
+            else:
+                # Target is fixed, same for all DLQs
+                target_queue = target_pattern
+            
+            queue_pairs.append((dlq_name, target_queue))
+            logger.debug(f"Queue pair: {dlq_name} -> {target_queue}")
+        
+        return queue_pairs
+    
+    def _derive_target_queue(self, dlq_name: str, dlq_pattern: str, target_pattern: str) -> str:
+        """
+        Derive target queue name from DLQ name using patterns.
+        
+        For example:
+        - dlq_name: "service1_dlq"
+        - dlq_pattern: "*_dlq"
+        - target_pattern: "*_failed"
+        - Result: "service1_failed"
+        
+        Args:
+            dlq_name: Actual DLQ name
+            dlq_pattern: Pattern with wildcards that matched the DLQ
+            target_pattern: Target pattern with wildcards
+            
+        Returns:
+            Derived target queue name
+        """
+        # Convert wildcard pattern to regex to extract the matched parts
+        # Escape special regex characters except * and ?
+        dlq_regex = re.escape(dlq_pattern).replace(r'\*', '(.*)').replace(r'\?', '(.)')
+        
+        match = re.match(dlq_regex, dlq_name)
+        if not match:
+            # Shouldn't happen as dlq_name was matched by fnmatch, but fallback
+            logger.warning(f"Unable to derive target queue for {dlq_name}, using pattern as-is")
+            return target_pattern
+        
+        # Get captured groups (the parts that matched wildcards)
+        captured_parts = match.groups()
+        
+        # Replace wildcards in target_pattern with captured parts
+        result = target_pattern
+        for part in captured_parts:
+            # Replace first occurrence of * or ?
+            if '*' in result:
+                result = result.replace('*', part, 1)
+            elif '?' in result:
+                result = result.replace('?', part, 1)
+        
+        return result
         
     def connect(self) -> bool:
         """
@@ -234,28 +394,31 @@ class RMQRetryChecker:
             logger.error(f"Failed to connect to RabbitMQ: {e}")
             return False
     
-    def ensure_target_queue_exists(self):
+    def ensure_target_queue_exists(self, target_queue: str):
         """
         Ensure the target queue (permanent failure queue) exists
+        
+        Args:
+            target_queue: Name of the target queue to ensure exists
         """
         try:
             # Try to declare as quorum queue first (RabbitMQ 3.8+)
             self.channel.queue_declare(
-                queue=self.config.TARGET_QUEUE,
+                queue=target_queue,
                 durable=True,
                 arguments={'x-queue-type': 'quorum'}
             )
-            logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready (quorum queue)")
+            logger.info(f"Target queue '{target_queue}' is ready (quorum queue)")
         except Exception as e:
             # Fall back to classic durable queue if quorum queues not supported
             logger.debug(f"Quorum queue not supported, trying classic queue: {e}")
             logger.warning("Quorum queues not supported, using classic durable queue instead")
             try:
                 self.channel.queue_declare(
-                    queue=self.config.TARGET_QUEUE,
+                    queue=target_queue,
                     durable=True
                 )
-                logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready (classic queue)")
+                logger.info(f"Target queue '{target_queue}' is ready (classic queue)")
             except Exception as e2:
                 logger.error(f"Failed to declare target queue: {e2}")
                 raise
@@ -285,7 +448,7 @@ class RMQRetryChecker:
         
         return 0
     
-    def process_message(self, ch, method, properties, body):
+    def process_message(self, ch, method, properties, body, target_queue: str, dlq_name: str):
         """
         Process a single message from the DLQ
         
@@ -294,8 +457,20 @@ class RMQRetryChecker:
             method: Delivery method
             properties: Message properties
             body: Message body
+            target_queue: Target queue for failed messages
+            dlq_name: Name of the DLQ being processed
         """
         self.messages_processed += 1
+        
+        # Initialize stats for this DLQ if not exists
+        if dlq_name not in self.queue_stats:
+            self.queue_stats[dlq_name] = {
+                'processed': 0,
+                'moved': 0,
+                'requeued': 0
+            }
+        
+        self.queue_stats[dlq_name]['processed'] += 1
         
         # Extract death count from headers
         death_count = self.get_death_count(properties.headers if properties.headers else {})
@@ -308,14 +483,14 @@ class RMQRetryChecker:
         if death_count > self.config.MAX_RETRY_COUNT:
             logger.warning(
                 f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}). "
-                f"Moving to permanent failure queue: {self.config.TARGET_QUEUE}"
+                f"Moving to permanent failure queue: {target_queue}"
             )
             
             try:
                 # Publish message to permanent failure queue
                 self.channel.basic_publish(
                     exchange='',
-                    routing_key=self.config.TARGET_QUEUE,
+                    routing_key=target_queue,
                     body=body,
                     properties=properties
                 )
@@ -323,8 +498,9 @@ class RMQRetryChecker:
                 # Acknowledge the message to remove it from DLQ
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 self.messages_moved += 1
+                self.queue_stats[dlq_name]['moved'] += 1
                 
-                logger.info(f"Successfully moved message to {self.config.TARGET_QUEUE}")
+                logger.info(f"Successfully moved message to {target_queue}")
                 
             except Exception as e:
                 logger.error(f"Failed to move message: {e}")
@@ -335,42 +511,74 @@ class RMQRetryChecker:
             logger.info(f"Message retry count ({death_count}) is within limit. Requeuing.")
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             self.messages_requeued += 1
+            self.queue_stats[dlq_name]['requeued'] += 1
     
     def check_dlq(self):
         """
-        Check all messages in the DLQ and process them
+        Check all messages in the DLQ(s) and process them.
+        Supports wildcard patterns to process multiple DLQs.
+        """
+        try:
+            # Get list of queue pairs to process (supports wildcards)
+            queue_pairs = self.get_matching_queue_pairs()
+            
+            if not queue_pairs:
+                logger.warning("No queues to process")
+                return
+            
+            logger.info(f"Processing {len(queue_pairs)} queue pair(s)")
+            
+            # Process each DLQ -> target queue pair
+            for dlq_name, target_queue in queue_pairs:
+                logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
+                self._process_single_dlq(dlq_name, target_queue)
+            
+            logger.info(f"All queues processed. Total - Processed: {self.messages_processed}, "
+                       f"Moved: {self.messages_moved}, Requeued: {self.messages_requeued}")
+            
+        except Exception as e:
+            logger.error(f"Error checking DLQ: {e}")
+            raise
+    
+    def _process_single_dlq(self, dlq_name: str, target_queue: str):
+        """
+        Process a single DLQ
+        
+        Args:
+            dlq_name: Name of the DLQ to process
+            target_queue: Name of the target queue for failed messages
         """
         try:
             # Ensure target queue exists
-            self.ensure_target_queue_exists()
+            self.ensure_target_queue_exists(target_queue)
             
             # Get queue information for logging
             try:
                 queue_info = self.channel.queue_declare(
-                    queue=self.config.DLQ_NAME,
+                    queue=dlq_name,
                     passive=True
                 )
             except pika.exceptions.ChannelClosedByBroker as exc:
                 logger.error(
                     "Dead Letter Queue '%s' does not exist or cannot be accessed: %s",
-                    self.config.DLQ_NAME,
+                    dlq_name,
                     exc,
                 )
                 raise
             
             message_count = queue_info.method.message_count
             
-            logger.info(f"DLQ '{self.config.DLQ_NAME}' has {message_count} messages")
+            logger.info(f"DLQ '{dlq_name}' has {message_count} messages")
             
             if message_count == 0:
-                logger.info("No messages to process")
+                logger.info(f"No messages to process in '{dlq_name}'")
                 return
             
             # Process messages until queue is empty
             # Don't rely on message_count as it can change during processing
             while True:
                 method_frame, properties, body = self.channel.basic_get(
-                    queue=self.config.DLQ_NAME,
+                    queue=dlq_name,
                     auto_ack=False
                 )
                 
@@ -378,14 +586,16 @@ class RMQRetryChecker:
                     # No more messages
                     break
                     
-                self.process_message(self.channel, method_frame, properties, body)
+                self.process_message(self.channel, method_frame, properties, body, target_queue, dlq_name)
             
-            logger.info(f"Processing complete. Processed: {self.messages_processed}, "
-                       f"Moved to permanent failure queue: {self.messages_moved}, "
-                       f"Requeued: {self.messages_requeued}")
+            # Log stats for this specific DLQ
+            if dlq_name in self.queue_stats:
+                stats = self.queue_stats[dlq_name]
+                logger.info(f"Completed '{dlq_name}': Processed={stats['processed']}, "
+                           f"Moved={stats['moved']}, Requeued={stats['requeued']}")
             
         except Exception as e:
-            logger.error(f"Error checking DLQ: {e}")
+            logger.error(f"Error processing DLQ '{dlq_name}': {e}")
             raise
     
     def close(self):
@@ -408,7 +618,7 @@ class RMQRetryChecker:
         if self.start_time and self.end_time:
             duration = (self.end_time - self.start_time).total_seconds()
         
-        return {
+        result = {
             'status': 'success' if self.success else 'error',
             'timestamp': datetime.now().isoformat(),
             'config': {
@@ -425,6 +635,12 @@ class RMQRetryChecker:
                 'duration_seconds': duration
             }
         }
+        
+        # Add per-queue statistics if we processed multiple queues
+        if len(self.queue_stats) > 1:
+            result['queue_statistics'] = self.queue_stats
+        
+        return result
     
     def output_results(self):
         """Output results in the configured format"""
