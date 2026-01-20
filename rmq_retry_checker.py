@@ -35,7 +35,7 @@ queue_stats = {}
 
 def load_config(config_file):
     """Load configuration from YAML file."""
-    with open(config_file, 'r') as f:
+    with open(config_file, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
     
     rmq = data.get('rabbitmq', {})
@@ -76,7 +76,7 @@ def load_processed_ids():
         cutoff = datetime.now() - timedelta(hours=config['dedup_max_age_hours'])
         valid = []
         
-        with open(dedup_file, 'r') as f:
+        with open(dedup_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -96,7 +96,7 @@ def load_processed_ids():
                     processed_ids.add(line)
                     valid.append((line, datetime.now()))
         
-        with open(dedup_file, 'w') as f:
+        with open(dedup_file, 'w', encoding='utf-8') as f:
             for fp, ts in valid:
                 f.write(f"{fp}:{ts.isoformat()}\n")
         
@@ -110,7 +110,7 @@ def save_processed_id(fingerprint):
     dedup_file = config.get('dedup_file')
     if dedup_file:
         try:
-            with open(dedup_file, 'a') as f:
+            with open(dedup_file, 'a', encoding='utf-8') as f:
                 f.write(f"{fingerprint}:{datetime.now().isoformat()}\n")
                 f.flush()
             processed_ids.add(fingerprint)
