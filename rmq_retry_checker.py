@@ -156,12 +156,15 @@ class RMQRetryChecker:
         try:
             cutoff_time = datetime.now() - timedelta(days=self.config.DEDUP_MAX_AGE_DAYS)
             valid_entries = []
+            total_entries = 0
             
             with open(dedup_file, 'r') as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
+                    
+                    total_entries += 1
                     
                     # Parse entry: fingerprint:timestamp or legacy fingerprint-only format
                     if ':' in line and line.count(':') >= 2:
@@ -173,6 +176,7 @@ class RMQRetryChecker:
                             if timestamp >= cutoff_time:
                                 valid_entries.append((fingerprint, timestamp))
                                 self.processed_ids.add(fingerprint)
+                            # else: expired entry, skip it
                         except ValueError:
                             # Invalid timestamp, treat as legacy format
                             self.processed_ids.add(line)
@@ -183,12 +187,11 @@ class RMQRetryChecker:
                         valid_entries.append((line, datetime.now()))
             
             # Rewrite file with only valid (non-expired) entries
-            removed_count = 0
             with open(dedup_file, 'w') as f:
                 for fingerprint, timestamp in valid_entries:
                     f.write(f"{fingerprint}:{timestamp.isoformat()}\n")
             
-            original_count = len(valid_entries) + removed_count
+            removed_count = total_entries - len(valid_entries)
             if removed_count > 0:
                 logger.info(f"Cleaned up {removed_count} expired entries from dedup file")
             logger.info(f"Loaded {len(self.processed_ids)} processed message IDs from {dedup_file}")
