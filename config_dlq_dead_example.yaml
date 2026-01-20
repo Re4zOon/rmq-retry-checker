@@ -1,0 +1,34 @@
+# RabbitMQ Retry Checker Configuration Example
+# This configuration demonstrates wildcard setup for the pattern:
+# DLQs named: dlq.queue1, dlq.queue2, dlq.payments, etc.
+# Target queues: dead.queue1, dead.queue2, dead.payments, etc.
+#
+# The queue name (e.g., "queue1", "payments") always remains the same
+# between the DLQ and its corresponding target queue.
+
+rabbitmq:
+  host: localhost
+  port: 5672
+  mgmt_port: 15672  # Management API port (required for wildcard support)
+  username: guest
+  password: guest
+  vhost: /
+  use_ssl: false
+
+queues:
+  # Wildcard pattern for DLQs: dlq.* matches dlq.queue1, dlq.queue2, etc.
+  dlq_name: dlq.*
+  
+  # Wildcard pattern for target queues: dead.* derives dead.queue1, dead.queue2, etc.
+  # The portion matched by * in dlq_name is substituted into target_queue
+  target_queue: dead.*
+  
+  # Maximum number of retries before moving to the dead queue
+  max_retry_count: 3
+
+# Example matching:
+# - dlq.queue1      -> dead.queue1
+# - dlq.queue2      -> dead.queue2
+# - dlq.payments    -> dead.payments
+# - dlq.orders      -> dead.orders
+# - dlq.inventory   -> dead.inventory
