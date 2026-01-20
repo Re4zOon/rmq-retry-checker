@@ -67,3 +67,66 @@ flowchart TD
 | `Config` | Handles configuration from files, environment variables, and CLI |
 | `RMQRetryChecker` | Main class that connects to RabbitMQ and processes messages |
 | Management API | Used only when wildcard patterns are specified |
+
+## Message Persistence
+
+The tool uses RabbitMQ's publisher confirms to ensure no messages are lost during processing:
+
+1. **Publisher Confirms**: The channel is set to confirm delivery mode. Each `basic_publish` blocks until the broker acknowledges receipt.
+2. **Persistent Messages**: Messages moved to the failure queue are published with `delivery_mode=2` (persistent), ensuring they survive broker restarts.
+3. **Mandatory Flag**: The `mandatory=True` flag ensures messages are routed to a queue; if not, an error is raised.
+4. **Ack After Confirm**: The original message is only acknowledged from the DLQ after the broker confirms the publish succeeded.
+
+```mermaid
+flowchart TD
+    A[Get Message from DLQ] --> B[Publish to Failure Queue]
+    B --> C{Broker Confirms?}
+    C -->|Yes| D[Ack Original Message]
+    C -->|No/Error| E[Nack & Requeue]
+    D --> F[Message Safely Moved]
+    E --> G[Message Stays in DLQ]
+```
+
+**Failure Scenarios:**
+
+| Scenario | Outcome |
+|----------|---------|
+| Script dies before publish | Message remains in DLQ (no loss) |
+| Script dies after publish, before ack | Message detected as duplicate on restart |
+| Broker rejects publish | Message remains in DLQ, error logged |
+| Network failure during publish | Message remains in DLQ (no loss) |
+
+## Deduplication
+
+To prevent duplicate messages in the target queue (e.g., if the script crashes after publishing but before acknowledging), the tool tracks processed message IDs:
+
+1. **Message Fingerprint**: Each message is identified by its `message_id` property. If no `message_id` is present, a SHA-256 hash of the body is used as fallback.
+2. **Dedup File**: Processed message fingerprints are stored in a local file (default: `.rmq_processed_ids`) with timestamps.
+3. **Skip Duplicates**: Before publishing, the tool checks if the fingerprint exists. If found, the message is acknowledged without republishing.
+4. **Auto-Cleanup**: Entries older than the configured age (default: 168 hours / 7 days) are automatically removed on startup to prevent unbounded file growth.
+
+```mermaid
+flowchart TD
+    A[Get Message from DLQ] --> B[Generate Fingerprint]
+    B --> C{Already Processed?}
+    C -->|Yes| D[Ack & Skip]
+    C -->|No| E[Publish to Target]
+    E --> F[Save Fingerprint + Timestamp]
+    F --> G[Ack Original]
+```
+
+**Configuration:**
+
+```bash
+# CLI
+python rmq_retry_checker.py --dedup-file /var/lib/rmq/processed.ids --dedup-max-age-hours 24
+
+# Environment variable
+export DEDUP_FILE=/var/lib/rmq/processed.ids
+export DEDUP_MAX_AGE_HOURS=24
+
+# Config file (queues section)
+queues:
+  dedup_file: /var/lib/rmq/processed.ids
+  dedup_max_age_hours: 24
+```
