@@ -66,7 +66,29 @@ class Config:
         # Queue Settings
         self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
         self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
-        self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', 3))
+        max_retry_raw = os.getenv('MAX_RETRY_COUNT', '3')
+        try:
+            self.MAX_RETRY_COUNT = int(max_retry_raw)
+            if self.MAX_RETRY_COUNT < 0:
+                raise ValueError(f"MAX_RETRY_COUNT must be non-negative, got: {self.MAX_RETRY_COUNT}")
+        except ValueError as e:
+            if "invalid literal" in str(e).lower():
+                raise ValueError(f"Invalid MAX_RETRY_COUNT value: {max_retry_raw!r}. Must be an integer.") from e
+            raise
+    
+    def validate(self):
+        """
+        Validate configuration values
+        
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        if not self.DLQ_NAME or not isinstance(self.DLQ_NAME, str):
+            raise ValueError("DLQ_NAME must be a non-empty string")
+        if not self.TARGET_QUEUE or not isinstance(self.TARGET_QUEUE, str):
+            raise ValueError("TARGET_QUEUE must be a non-empty string")
+        if self.MAX_RETRY_COUNT < 0:
+            raise ValueError(f"MAX_RETRY_COUNT must be non-negative, got: {self.MAX_RETRY_COUNT}")
     
     def load_from_file(self, config_file: str):
         """
@@ -107,7 +129,10 @@ class Config:
             queues = config_data['queues']
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
-            self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
+            max_retry_count = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
+            if max_retry_count < 0:
+                raise ValueError(f"max_retry_count in YAML must be non-negative, got: {max_retry_count}")
+            self.MAX_RETRY_COUNT = max_retry_count
     
     @staticmethod
     def _parse_bool(value) -> bool:
@@ -225,15 +250,25 @@ class RMQRetryChecker:
         Ensure the target queue (permanent failure queue) exists
         """
         try:
+            # Try to declare as quorum queue first (RabbitMQ 3.8+)
             self.channel.queue_declare(
                 queue=self.config.TARGET_QUEUE,
                 durable=True,
                 arguments={'x-queue-type': 'quorum'}
             )
-            logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready")
+            logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready (quorum queue)")
         except Exception as e:
-            logger.error(f"Failed to declare target queue: {e}")
-            raise
+            # Fall back to classic durable queue if quorum queues not supported
+            logger.warning(f"Failed to declare quorum queue, trying classic queue: {e}")
+            try:
+                self.channel.queue_declare(
+                    queue=self.config.TARGET_QUEUE,
+                    durable=True
+                )
+                logger.info(f"Target queue '{self.config.TARGET_QUEUE}' is ready (classic queue)")
+            except Exception as e2:
+                logger.error(f"Failed to declare target queue: {e2}")
+                raise
     
     def get_death_count(self, headers: Dict[str, Any]) -> int:
         """
@@ -493,7 +528,11 @@ Configuration precedence (highest to lowest):
     conn_group.add_argument('--host', help='RabbitMQ host (default: localhost)')
     conn_group.add_argument('--port', type=int, help='RabbitMQ port (default: 5672)')
     conn_group.add_argument('--username', help='RabbitMQ username (default: guest)')
-    conn_group.add_argument('--password', help='RabbitMQ password (default: guest)')
+    conn_group.add_argument('--password', help=(
+        'RabbitMQ password (default: guest). '
+        'WARNING: Avoid using --password in production as command-line arguments '
+        'are visible in process lists. Use environment variables or config files instead.'
+    ))
     conn_group.add_argument('--vhost', help='RabbitMQ virtual host (default: /)')
     conn_group.add_argument('--ssl', action='store_true', help='Use SSL/TLS connection')
     
@@ -541,10 +580,17 @@ def main():
     # Override with command-line arguments
     config.update_from_args(args)
     
+    # Validate configuration
+    try:
+        config.validate()
+    except ValueError as e:
+        logger.error(f"Configuration validation failed: {e}")
+        sys.exit(1)
+    
     logger.info("Starting RabbitMQ Retry Checker")
-    logger.info(f"Configuration: DLQ='{config.DLQ_NAME}', "
-               f"Target Queue='{config.TARGET_QUEUE}', "
-               f"Max Retry Count={config.MAX_RETRY_COUNT}")
+    logger.debug(f"Configuration: DLQ='{config.DLQ_NAME}', "
+                f"Target Queue='{config.TARGET_QUEUE}', "
+                f"Max Retry Count={config.MAX_RETRY_COUNT}")
     
     # Run checker
     checker = RMQRetryChecker(config, output_format=args.output_format)
