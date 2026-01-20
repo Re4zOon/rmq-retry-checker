@@ -43,6 +43,7 @@ try:
     import urllib.request
     import urllib.parse
     import base64
+    import ssl
 except ImportError:
     # These should be available in standard library
     pass
@@ -237,9 +238,13 @@ class RMQRetryChecker:
         protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
         
         # Validate host is a proper hostname or IP address
-        # Hostname can contain alphanumeric, dots, hyphens, and underscores
+        # This regex supports:
+        # - Standard hostnames (alphanumeric, dots, hyphens)
+        # - IPv4 addresses (simple validation)
+        # - localhost and simple names
+        # Note: For IPv6 addresses, use bracketed notation in config (e.g., [::1])
         host = self.config.RMQ_HOST
-        if not re.match(r'^[a-zA-Z0-9._-]+$', host):
+        if not re.match(r'^[\w.\-\[\]:]+$', host):
             raise ValueError(f"Invalid RMQ_HOST value. Host must be a valid hostname or IP address.")
         
         # URL encode the vhost (/ becomes %2F)
@@ -258,7 +263,6 @@ class RMQRetryChecker:
             # Configure SSL context for HTTPS
             context = None
             if self.config.RMQ_USE_SSL:
-                import ssl
                 # Create SSL context with certificate verification enabled
                 context = ssl.create_default_context()
             
@@ -378,8 +382,7 @@ class RMQRetryChecker:
         # Get captured groups (the parts that matched wildcards)
         captured_parts = list(match.groups())
         
-        # Create an iterator for captured parts
-        import itertools
+        # Create an iterator for captured parts (using built-in iter)
         parts_iter = iter(captured_parts)
         
         def replace_wildcard(match_obj):
