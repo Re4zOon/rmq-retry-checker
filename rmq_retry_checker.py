@@ -229,7 +229,8 @@ class RMQRetryChecker:
             
             self.connection = pika.BlockingConnection(parameters)
             self.channel = self.connection.channel()
-            logger.info("Connected to RabbitMQ")
+            self.channel.confirm_delivery()
+            logger.info("Connected to RabbitMQ with publisher confirms enabled")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to RabbitMQ: {e}")
@@ -271,10 +272,38 @@ class RMQRetryChecker:
         if death_count > self.config.MAX_RETRY_COUNT:
             logger.warning(f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}), moving to {target_queue}")
             try:
-                self.channel.basic_publish(exchange='', routing_key=target_queue, body=body, properties=properties)
+                # Ensure message persistence with delivery_mode=2
+                persistent_properties = pika.BasicProperties(
+                    delivery_mode=2,  # persistent
+                    content_type=properties.content_type,
+                    content_encoding=properties.content_encoding,
+                    headers=properties.headers,
+                    priority=properties.priority,
+                    correlation_id=properties.correlation_id,
+                    reply_to=properties.reply_to,
+                    expiration=properties.expiration,
+                    message_id=properties.message_id,
+                    timestamp=properties.timestamp,
+                    type=properties.type,
+                    user_id=properties.user_id,
+                    app_id=properties.app_id,
+                )
+                # With confirm_delivery enabled, basic_publish blocks until broker confirms
+                # mandatory=True ensures the message is routed to a queue
+                self.channel.basic_publish(
+                    exchange='',
+                    routing_key=target_queue,
+                    body=body,
+                    properties=persistent_properties,
+                    mandatory=True
+                )
+                # Only ack after broker confirms the publish succeeded
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 self.messages_moved += 1
                 self.queue_stats[dlq_name]['moved'] += 1
+            except pika.exceptions.UnroutableError as e:
+                logger.error(f"Message unroutable to {target_queue}: {e}")
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             except Exception as e:
                 logger.error(f"Failed to move message: {e}")
                 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
