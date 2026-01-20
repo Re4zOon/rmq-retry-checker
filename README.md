@@ -102,6 +102,7 @@ python rmq_retry_checker.py --output-format json --quiet
 | `--password` | RabbitMQ password |
 | `--vhost` | Virtual host (default: /) |
 | `--ssl` | Enable SSL/TLS |
+| `--no-ssl-verify` | Disable SSL certificate verification (for self-signed certs) |
 | `--dlq` | DLQ name (supports wildcards) |
 | `--target-queue` | Target queue for failed messages |
 | `--max-retries` | Max retry count (default: 3) |

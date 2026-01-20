@@ -8,6 +8,7 @@ rabbitmq:
   password: guest
   vhost: /
   use_ssl: false
+  ssl_verify: true  # Set to false for self-signed certificates
 
 queues:
   dlq_name: my_dlq              # Supports wildcards: dlq.*, service_*_dlq

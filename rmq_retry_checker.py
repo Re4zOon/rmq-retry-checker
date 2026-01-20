@@ -49,6 +49,7 @@ class Config:
         self.RMQ_PASSWORD = os.getenv('RMQ_PASSWORD', 'guest')
         self.RMQ_VHOST = os.getenv('RMQ_VHOST', '/')
         self.RMQ_USE_SSL = os.getenv('RMQ_USE_SSL', 'false').lower() == 'true'
+        self.RMQ_SSL_VERIFY = os.getenv('RMQ_SSL_VERIFY', 'true').lower() == 'true'
         self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
         self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
         self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', '3'))
@@ -75,6 +76,9 @@ class Config:
             self.RMQ_USE_SSL = rmq.get('use_ssl', self.RMQ_USE_SSL)
             if isinstance(self.RMQ_USE_SSL, str):
                 self.RMQ_USE_SSL = self.RMQ_USE_SSL.lower() == 'true'
+            self.RMQ_SSL_VERIFY = rmq.get('ssl_verify', self.RMQ_SSL_VERIFY)
+            if isinstance(self.RMQ_SSL_VERIFY, str):
+                self.RMQ_SSL_VERIFY = self.RMQ_SSL_VERIFY.lower() == 'true'
         
         if 'queues' in config_data:
             queues = config_data['queues']
@@ -97,6 +101,8 @@ class Config:
             self.RMQ_VHOST = args.vhost
         if args.ssl:
             self.RMQ_USE_SSL = True
+        if hasattr(args, 'no_ssl_verify') and args.no_ssl_verify:
+            self.RMQ_SSL_VERIFY = False
         if args.dlq:
             self.DLQ_NAME = args.dlq
         if args.target_queue:
@@ -136,7 +142,12 @@ class RMQRetryChecker:
         request = urllib.request.Request(url)
         request.add_header('Authorization', f'Basic {auth_b64}')
         
-        context = ssl.create_default_context() if self.config.RMQ_USE_SSL else None
+        context = None
+        if self.config.RMQ_USE_SSL:
+            context = ssl.create_default_context()
+            if not self.config.RMQ_SSL_VERIFY:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
         
         try:
             with urllib.request.urlopen(request, timeout=10, context=context) as response:
@@ -210,7 +221,13 @@ class RMQRetryChecker:
             )
             
             if self.config.RMQ_USE_SSL:
-                parameters.ssl_options = pika.SSLOptions(context=ssl.create_default_context())
+                if self.config.RMQ_SSL_VERIFY:
+                    ssl_context = ssl.create_default_context()
+                else:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                parameters.ssl_options = pika.SSLOptions(context=ssl_context)
             
             self.connection = pika.BlockingConnection(parameters)
             self.channel = self.connection.channel()
@@ -384,6 +401,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--password', help='RabbitMQ password')
     parser.add_argument('--vhost', help='RabbitMQ virtual host')
     parser.add_argument('--ssl', action='store_true', help='Use SSL/TLS')
+    parser.add_argument('--no-ssl-verify', action='store_true', dest='no_ssl_verify', help='Disable SSL certificate verification (for self-signed certs)')
     parser.add_argument('--dlq', help='Dead Letter Queue name')
     parser.add_argument('--target-queue', help='Target queue for failed messages')
     parser.add_argument('--max-retries', type=int, help='Max retry count')
