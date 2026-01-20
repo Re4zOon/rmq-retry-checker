@@ -3,13 +3,11 @@
 RabbitMQ Retry Checker - Detect and handle infinite retry loops in DLQs.
 
 Usage:
-    python rmq_retry_checker.py --config config.yaml
-    python rmq_retry_checker.py --dlq my_dlq --target-queue failed_queue --max-retries 3
+    python rmq_retry_checker.py config.yaml
 """
 import sys
 import os
 import logging
-import argparse
 import json
 import fnmatch
 import re
@@ -18,550 +16,364 @@ import urllib.parse
 import base64
 import ssl
 import hashlib
-from typing import Optional, Dict, Any, List, Tuple, Set
 from datetime import datetime, timedelta
 
 import pika
 import yaml
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-class Config:
-    """Configuration for RabbitMQ connection and queue settings."""
-    
-    def __init__(self):
-        if load_dotenv:
-            load_dotenv()
-        
-        self.RMQ_HOST = os.getenv('RMQ_HOST', 'localhost')
-        self.RMQ_PORT = int(os.getenv('RMQ_PORT', 5672))
-        self.RMQ_MGMT_PORT = int(os.getenv('RMQ_MGMT_PORT', 15672))
-        self.RMQ_USERNAME = os.getenv('RMQ_USERNAME', 'guest')
-        self.RMQ_PASSWORD = os.getenv('RMQ_PASSWORD', 'guest')
-        self.RMQ_VHOST = os.getenv('RMQ_VHOST', '/')
-        self.RMQ_USE_SSL = os.getenv('RMQ_USE_SSL', 'false').lower() == 'true'
-        self.RMQ_SSL_VERIFY = os.getenv('RMQ_SSL_VERIFY', 'true').lower() == 'true'
-        self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
-        self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
-        self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', '3'))
-        self.DEDUP_FILE = os.getenv('DEDUP_FILE', '.rmq_processed_ids')
-        self.DEDUP_MAX_AGE_HOURS = int(os.getenv('DEDUP_MAX_AGE_HOURS', '168'))
-    
-    @staticmethod
-    def has_wildcard(pattern: str) -> bool:
-        return '*' in pattern or '?' in pattern
-    
-    def load_from_file(self, config_file: str):
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
-        
-        if config_data is None:
-            return
-        
-        if 'rabbitmq' in config_data:
-            rmq = config_data['rabbitmq']
-            self.RMQ_HOST = rmq.get('host', self.RMQ_HOST)
-            self.RMQ_PORT = int(rmq.get('port', self.RMQ_PORT))
-            self.RMQ_MGMT_PORT = int(rmq.get('mgmt_port', self.RMQ_MGMT_PORT))
-            self.RMQ_USERNAME = rmq.get('username', self.RMQ_USERNAME)
-            self.RMQ_PASSWORD = rmq.get('password', self.RMQ_PASSWORD)
-            self.RMQ_VHOST = rmq.get('vhost', self.RMQ_VHOST)
-            self.RMQ_USE_SSL = rmq.get('use_ssl', self.RMQ_USE_SSL)
-            if isinstance(self.RMQ_USE_SSL, str):
-                self.RMQ_USE_SSL = self.RMQ_USE_SSL.lower() == 'true'
-            self.RMQ_SSL_VERIFY = rmq.get('ssl_verify', self.RMQ_SSL_VERIFY)
-            if isinstance(self.RMQ_SSL_VERIFY, str):
-                self.RMQ_SSL_VERIFY = self.RMQ_SSL_VERIFY.lower() == 'true'
-        
-        if 'queues' in config_data:
-            queues = config_data['queues']
-            self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
-            self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
-            self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
-            self.DEDUP_FILE = queues.get('dedup_file', self.DEDUP_FILE)
-            self.DEDUP_MAX_AGE_HOURS = int(queues.get('dedup_max_age_hours', self.DEDUP_MAX_AGE_HOURS))
-    
-    def update_from_args(self, args: argparse.Namespace):
-        if args.host:
-            self.RMQ_HOST = args.host
-        if args.port:
-            self.RMQ_PORT = args.port
-        if args.mgmt_port:
-            self.RMQ_MGMT_PORT = args.mgmt_port
-        if args.username:
-            self.RMQ_USERNAME = args.username
-        if args.password:
-            self.RMQ_PASSWORD = args.password
-        if args.vhost:
-            self.RMQ_VHOST = args.vhost
-        if args.ssl:
-            self.RMQ_USE_SSL = True
-        if args.no_ssl_verify:
-            self.RMQ_SSL_VERIFY = False
-        if args.dlq:
-            self.DLQ_NAME = args.dlq
-        if args.target_queue:
-            self.TARGET_QUEUE = args.target_queue
-        if args.max_retries is not None:
-            self.MAX_RETRY_COUNT = args.max_retries
-        if args.dedup_file:
-            self.DEDUP_FILE = args.dedup_file
-        if args.dedup_max_age_hours is not None:
-            self.DEDUP_MAX_AGE_HOURS = args.dedup_max_age_hours
+# Global state
+config = {}
+connection = None
+channel = None
+processed_ids = set()
+stats = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
+queue_stats = {}
 
 
-class RMQRetryChecker:
-    """RabbitMQ Retry Checker - moves messages exceeding retry threshold to failure queue."""
+def load_config(config_file):
+    """Load configuration from YAML file."""
+    with open(config_file, 'r') as f:
+        data = yaml.safe_load(f) or {}
     
-    def __init__(self, config: Config, output_format: str = 'text'):
-        self.config = config
-        self.output_format = output_format
-        self.connection: Optional[pika.BlockingConnection] = None
-        self.channel: Optional[pika.channel.Channel] = None
-        self.messages_processed = 0
-        self.messages_moved = 0
-        self.messages_requeued = 0
-        self.messages_skipped = 0
-        self.start_time = None
-        self.end_time = None
-        self.success = False
-        self.queue_stats: Dict[str, Dict[str, int]] = {}
-        self.processed_ids: Set[str] = set()
-        self._load_processed_ids()
+    rmq = data.get('rabbitmq', {})
+    queues = data.get('queues', {})
     
-    def _get_message_fingerprint(self, properties, body: bytes) -> str:
-        """Generate a unique fingerprint for a message using message_id or body hash."""
-        if properties and getattr(properties, "message_id", None):
-            return f"id:{properties.message_id}"
-        # Fallback to body hash if no message_id or no properties
-        body_hash = hashlib.sha256(body).hexdigest()
-        return f"hash:{body_hash}"
+    cfg = {
+        'host': rmq.get('host', 'localhost'),
+        'port': int(rmq.get('port', 5672)),
+        'mgmt_port': int(rmq.get('mgmt_port', 15672)),
+        'username': rmq.get('username', 'guest'),
+        'password': rmq.get('password', 'guest'),
+        'vhost': rmq.get('vhost', '/'),
+        'use_ssl': rmq.get('use_ssl', False),
+        'ssl_verify': rmq.get('ssl_verify', True),
+        'dlq_name': queues.get('dlq_name', 'my_dlq'),
+        'target_queue': queues.get('target_queue', 'permanent_failure_queue'),
+        'max_retry_count': int(queues.get('max_retry_count', 3)),
+        'dedup_file': queues.get('dedup_file', '.rmq_processed_ids'),
+        'dedup_max_age_hours': int(queues.get('dedup_max_age_hours', 168)),
+    }
     
-    def _load_processed_ids(self):
-        """Load previously processed message IDs from dedup file, cleaning up old entries."""
-        dedup_file = self.config.DEDUP_FILE
-        if not dedup_file or not os.path.exists(dedup_file):
-            return
+    # Handle string booleans
+    if isinstance(cfg['use_ssl'], str):
+        cfg['use_ssl'] = cfg['use_ssl'].lower() == 'true'
+    if isinstance(cfg['ssl_verify'], str):
+        cfg['ssl_verify'] = cfg['ssl_verify'].lower() == 'true'
+    
+    return cfg
+
+
+def load_processed_ids():
+    """Load previously processed message IDs from dedup file."""
+    dedup_file = config.get('dedup_file')
+    if not dedup_file or not os.path.exists(dedup_file):
+        return
+    
+    try:
+        cutoff = datetime.now() - timedelta(hours=config['dedup_max_age_hours'])
+        valid = []
         
+        with open(dedup_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if ':' in line and line.count(':') >= 2:
+                    parts = line.rsplit(':', 1)
+                    fingerprint = parts[0]
+                    try:
+                        ts = datetime.fromisoformat(parts[1])
+                        if ts >= cutoff:
+                            valid.append((fingerprint, ts))
+                            processed_ids.add(fingerprint)
+                    except ValueError:
+                        processed_ids.add(line)
+                        valid.append((line, datetime.now()))
+                else:
+                    processed_ids.add(line)
+                    valid.append((line, datetime.now()))
+        
+        with open(dedup_file, 'w') as f:
+            for fp, ts in valid:
+                f.write(f"{fp}:{ts.isoformat()}\n")
+        
+        logger.info(f"Loaded {len(processed_ids)} processed IDs from {dedup_file}")
+    except Exception as e:
+        logger.warning(f"Failed to load dedup file: {e}")
+
+
+def save_processed_id(fingerprint):
+    """Save processed message ID to dedup file."""
+    dedup_file = config.get('dedup_file')
+    if dedup_file:
         try:
-            cutoff_time = datetime.now() - timedelta(hours=self.config.DEDUP_MAX_AGE_HOURS)
-            valid_entries = []
-            total_entries = 0
-            
-            with open(dedup_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    total_entries += 1
-                    
-                    # Parse entry: fingerprint:timestamp or legacy fingerprint-only format
-                    if ':' in line and line.count(':') >= 2:
-                        # New format: fingerprint:timestamp (fingerprint may contain ':')
-                        parts = line.rsplit(':', 1)
-                        fingerprint = parts[0]
-                        try:
-                            timestamp = datetime.fromisoformat(parts[1])
-                            if timestamp >= cutoff_time:
-                                valid_entries.append((fingerprint, timestamp))
-                                self.processed_ids.add(fingerprint)
-                            # else: expired entry, skip it
-                        except ValueError:
-                            # Invalid timestamp, treat as legacy format
-                            self.processed_ids.add(line)
-                            valid_entries.append((line, datetime.now()))
-                    else:
-                        # Legacy format: just fingerprint, keep it with current time
-                        self.processed_ids.add(line)
-                        valid_entries.append((line, datetime.now()))
-            
-            # Rewrite file with only valid (non-expired) entries
-            with open(dedup_file, 'w') as f:
-                for fingerprint, timestamp in valid_entries:
-                    f.write(f"{fingerprint}:{timestamp.isoformat()}\n")
-            
-            removed_count = total_entries - len(valid_entries)
-            if removed_count > 0:
-                logger.info(f"Cleaned up {removed_count} expired entries from dedup file")
-            logger.info(f"Loaded {len(self.processed_ids)} processed message IDs from {dedup_file}")
+            with open(dedup_file, 'a') as f:
+                f.write(f"{fingerprint}:{datetime.now().isoformat()}\n")
+                f.flush()
+            processed_ids.add(fingerprint)
         except Exception as e:
-            logger.warning(f"Failed to load dedup file: {e}")
+            logger.warning(f"Failed to save dedup: {e}")
+
+
+def get_fingerprint(properties, body):
+    """Generate fingerprint for message deduplication."""
+    if properties and getattr(properties, 'message_id', None):
+        return f"id:{properties.message_id}"
+    return f"hash:{hashlib.sha256(body).hexdigest()}"
+
+
+def connect():
+    """Connect to RabbitMQ."""
+    global connection, channel
     
-    def _save_processed_id(self, fingerprint: str):
-        """Append a processed message ID with timestamp to the dedup file."""
-        dedup_file = self.config.DEDUP_FILE
-        if dedup_file:
-            try:
-                timestamp = datetime.now().isoformat()
-                with open(dedup_file, 'a') as f:
-                    f.write(f"{fingerprint}:{timestamp}\n")
-                    f.flush()
-                # Only add to in-memory set after successful file write and flush
-                self.processed_ids.add(fingerprint)
-            except Exception as e:
-                # Don't add to in-memory set if file write fails
-                # This ensures in-memory state never gets ahead of persisted state
-                logger.warning(f"Failed to save to dedup file: {e}")
+    try:
+        creds = pika.PlainCredentials(config['username'], config['password'])
+        params = pika.ConnectionParameters(
+            host=config['host'],
+            port=config['port'],
+            virtual_host=config['vhost'],
+            credentials=creds,
+            heartbeat=600,
+            blocked_connection_timeout=300
+        )
+        
+        if config['use_ssl']:
+            ctx = ssl.create_default_context()
+            if not config['ssl_verify']:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            params.ssl_options = pika.SSLOptions(context=ctx)
+        
+        connection = pika.BlockingConnection(params)
+        channel = connection.channel()
+        channel.confirm_delivery()
+        logger.info("Connected to RabbitMQ")
+        return True
+    except Exception as e:
+        logger.error(f"Connection failed: {e}")
+        return False
+
+
+def close():
+    """Close RabbitMQ connection."""
+    global connection
+    if connection and not connection.is_closed:
+        connection.close()
+        logger.info("Connection closed")
+
+
+def list_queues():
+    """List queues from Management API."""
+    protocol = 'https' if config['use_ssl'] else 'http'
+    vhost = urllib.parse.quote(config['vhost'], safe='')
+    url = f"{protocol}://{config['host']}:{config['mgmt_port']}/api/queues/{vhost}"
     
-    def _is_already_processed(self, fingerprint: str) -> bool:
-        """Check if a message has already been processed."""
-        return fingerprint in self.processed_ids
+    auth = base64.b64encode(f"{config['username']}:{config['password']}".encode()).decode()
+    req = urllib.request.Request(url)
+    req.add_header('Authorization', f'Basic {auth}')
     
+    ctx = None
+    if config['use_ssl']:
+        ctx = ssl.create_default_context()
+        if not config['ssl_verify']:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
     
-    def list_queues_from_api(self) -> List[str]:
-        """List all queues from RabbitMQ Management API."""
-        mgmt_port = self.config.RMQ_MGMT_PORT
-        protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
-        host = self.config.RMQ_HOST
-        
-        vhost_encoded = urllib.parse.quote(self.config.RMQ_VHOST, safe='')
-        url = f"{protocol}://{host}:{mgmt_port}/api/queues/{vhost_encoded}"
-        
-        auth_string = f"{self.config.RMQ_USERNAME}:{self.config.RMQ_PASSWORD}"
-        auth_b64 = base64.b64encode(auth_string.encode('ascii')).decode('ascii')
-        
-        request = urllib.request.Request(url)
-        request.add_header('Authorization', f'Basic {auth_b64}')
-        
-        context = None
-        if self.config.RMQ_USE_SSL:
-            context = ssl.create_default_context()
-            if not self.config.RMQ_SSL_VERIFY:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-        
-        try:
-            with urllib.request.urlopen(request, timeout=10, context=context) as response:
-                data = json.loads(response.read().decode('utf-8'))
-        except Exception as e:
-            logger.error(f"Failed to list queues from Management API ({host}:{mgmt_port}): {e}")
-            raise
-        
-        return [q['name'] for q in data if 'name' in q]
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            return [q['name'] for q in json.loads(resp.read()) if 'name' in q]
+    except Exception as e:
+        logger.error(f"Failed to list queues: {e}")
+        raise
+
+
+def get_queue_pairs():
+    """Get DLQ/target queue pairs, supporting wildcards."""
+    dlq = config['dlq_name']
+    target = config['target_queue']
     
-    def get_matching_queue_pairs(self) -> List[Tuple[str, str]]:
-        """Get list of (dlq_name, target_queue) pairs, supporting wildcard patterns."""
-        dlq_pattern = self.config.DLQ_NAME
-        target_pattern = self.config.TARGET_QUEUE
-        
-        dlq_has_wildcard = Config.has_wildcard(dlq_pattern)
-        target_has_wildcard = Config.has_wildcard(target_pattern)
-        
-        if not dlq_has_wildcard and not target_has_wildcard:
-            return [(dlq_pattern, target_pattern)]
-        
-        logger.info("Wildcard pattern detected, querying RabbitMQ Management API")
-        all_queues = self.list_queues_from_api()
-        matching_dlqs = [q for q in all_queues if fnmatch.fnmatch(q, dlq_pattern)]
-        
-        if not matching_dlqs:
-            logger.warning(f"No queues found matching DLQ pattern: {dlq_pattern}")
-            return []
-        
-        logger.info(f"Found {len(matching_dlqs)} DLQ(s) matching '{dlq_pattern}'")
-        
-        queue_pairs = []
-        for dlq_name in matching_dlqs:
-            if target_has_wildcard:
-                target_queue = self._derive_target_queue(dlq_name, dlq_pattern, target_pattern)
+    has_wc = lambda p: '*' in p or '?' in p
+    if not has_wc(dlq) and not has_wc(target):
+        return [(dlq, target)]
+    
+    logger.info("Wildcard detected, querying Management API")
+    all_queues = list_queues()
+    matches = [q for q in all_queues if fnmatch.fnmatch(q, dlq)]
+    
+    if not matches:
+        logger.warning(f"No queues match: {dlq}")
+        return []
+    
+    logger.info(f"Found {len(matches)} DLQ(s)")
+    
+    pairs = []
+    for dlq_name in matches:
+        if has_wc(target):
+            # Derive target from DLQ name
+            regex = re.escape(dlq).replace(r'\*', '(.*?)').replace(r'\?', '(.)')
+            m = re.match(f'^{regex}$', dlq_name)
+            if m:
+                parts = iter(m.groups())
+                tgt = re.sub(r'[*?]', lambda _: next(parts), target)
             else:
-                target_queue = target_pattern
-            queue_pairs.append((dlq_name, target_queue))
-        
-        return queue_pairs
+                tgt = target
+        else:
+            tgt = target
+        pairs.append((dlq_name, tgt))
     
-    def _derive_target_queue(self, dlq_name: str, dlq_pattern: str, target_pattern: str) -> str:
-        """Derive target queue name from DLQ name using wildcard patterns."""
-        dlq_regex = re.escape(dlq_pattern)
-        dlq_regex = dlq_regex.replace(r'\*', '(.*?)').replace(r'\?', '(.)')
-        dlq_regex = f'^{dlq_regex}$'
-        
-        match = re.match(dlq_regex, dlq_name)
-        if not match:
-            raise ValueError(f"Unable to derive target queue for '{dlq_name}'")
-        
-        captured_parts = list(match.groups())
-        parts_iter = iter(captured_parts)
-        
-        def replace_wildcard(match_obj):
-            return next(parts_iter)
-        
-        return re.sub(r'[*?]', replace_wildcard, target_pattern)
-        
-    def connect(self) -> bool:
-        """Establish connection to RabbitMQ."""
-        try:
-            credentials = pika.PlainCredentials(self.config.RMQ_USERNAME, self.config.RMQ_PASSWORD)
-            parameters = pika.ConnectionParameters(
-                host=self.config.RMQ_HOST,
-                port=self.config.RMQ_PORT,
-                virtual_host=self.config.RMQ_VHOST,
-                credentials=credentials,
-                heartbeat=600,
-                blocked_connection_timeout=300
-            )
-            
-            if self.config.RMQ_USE_SSL:
-                ssl_context = ssl.create_default_context()
-                if not self.config.RMQ_SSL_VERIFY:
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-                parameters.ssl_options = pika.SSLOptions(context=ssl_context)
-            
-            self.connection = pika.BlockingConnection(parameters)
-            self.channel = self.connection.channel()
-            self.channel.confirm_delivery()
-            logger.info("Connected to RabbitMQ with publisher confirms enabled")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to RabbitMQ: {e}")
-            return False
-    
-    def ensure_target_queue_exists(self, target_queue: str):
-        """Ensure the target queue exists."""
-        try:
-            self.channel.queue_declare(queue=target_queue, durable=True, arguments={'x-queue-type': 'quorum'})
-            logger.info(f"Target queue '{target_queue}' is ready (quorum)")
-        except Exception:
-            self.channel.queue_declare(queue=target_queue, durable=True)
-            logger.info(f"Target queue '{target_queue}' is ready (classic)")
-    
-    def get_death_count(self, headers: Dict[str, Any]) -> int:
-        """Extract the x-death count from message headers."""
-        if not headers:
-            return 0
-        x_death = headers.get('x-death')
-        if not x_death or not isinstance(x_death, list) or len(x_death) == 0:
-            return 0
-        first_death = x_death[0]
-        if isinstance(first_death, dict):
-            count = first_death.get('count', 0)
-            return int(count) if count else 0
+    return pairs
+
+
+def get_death_count(headers):
+    """Get x-death count from headers."""
+    if not headers:
         return 0
+    x_death = headers.get('x-death')
+    if x_death and isinstance(x_death, list) and x_death:
+        if isinstance(x_death[0], dict):
+            return int(x_death[0].get('count', 0) or 0)
+    return 0
+
+
+def ensure_queue(queue_name):
+    """Ensure target queue exists."""
+    try:
+        channel.queue_declare(queue=queue_name, durable=True, arguments={'x-queue-type': 'quorum'})
+        logger.info(f"Queue '{queue_name}' ready (quorum)")
+    except Exception:
+        channel.queue_declare(queue=queue_name, durable=True)
+        logger.info(f"Queue '{queue_name}' ready (classic)")
+
+
+def process_message(method, properties, body, target_queue, dlq_name):
+    """Process a single DLQ message."""
+    stats['processed'] += 1
+    if dlq_name not in queue_stats:
+        queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
+    queue_stats[dlq_name]['processed'] += 1
     
-    def process_message(self, ch, method, properties, body, target_queue: str, dlq_name: str):
-        """Process a single message from the DLQ."""
-        self.messages_processed += 1
-        
-        if dlq_name not in self.queue_stats:
-            self.queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
-        self.queue_stats[dlq_name]['processed'] += 1
-        
-        death_count = self.get_death_count(properties.headers or {})
-        logger.info(f"Message {self.messages_processed}: x-death count={death_count}")
-        
-        if death_count > self.config.MAX_RETRY_COUNT:
-            # Check for duplicates before moving
-            fingerprint = self._get_message_fingerprint(properties, body)
-            if self._is_already_processed(fingerprint):
-                logger.info(f"Message already processed (duplicate), skipping: {fingerprint}")
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                self.messages_skipped += 1
-                self.queue_stats[dlq_name]['skipped'] += 1
-                return
-            
-            logger.warning(f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}), moving to {target_queue}")
-            try:
-                # Copy properties and ensure persistence with delivery_mode=2
-                props_dict = {
-                    attr: getattr(properties, attr, None)
-                    for attr in ['content_type', 'content_encoding', 'headers', 'priority',
-                                 'correlation_id', 'reply_to', 'expiration', 'message_id',
-                                 'timestamp', 'type', 'user_id', 'app_id', 'cluster_id']
-                }
-                props_dict['delivery_mode'] = 2  # persistent
-                persistent_properties = pika.BasicProperties(**props_dict)
-                # With confirm_delivery enabled, basic_publish blocks until broker confirms
-                # mandatory=True ensures the message is routed to a queue
-                self.channel.basic_publish(
-                    exchange='',
-                    routing_key=target_queue,
-                    body=body,
-                    properties=persistent_properties,
-                    mandatory=True
-                )
-                # After the broker confirms the publish, record the message as processed
-                # before acknowledging the original DLQ message. This avoids a window where
-                # the DLQ message is acked but the fingerprint is not yet saved.
-                self._save_processed_id(fingerprint)
-                # Only ack after both publish and dedup record have succeeded
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                self.messages_moved += 1
-                self.queue_stats[dlq_name]['moved'] += 1
-            except pika.exceptions.UnroutableError as e:
-                logger.error(f"Message unroutable to {target_queue}: {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-            except Exception as e:
-                logger.error(f"Failed to move message: {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-        else:
-            logger.info(f"Message retry count ({death_count}) within limit, requeuing")
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-            self.messages_requeued += 1
-            self.queue_stats[dlq_name]['requeued'] += 1
+    death_count = get_death_count(properties.headers or {})
+    logger.info(f"Message {stats['processed']}: x-death={death_count}")
     
-    def check_dlq(self):
-        """Check all messages in the DLQ(s) and process them."""
-        queue_pairs = self.get_matching_queue_pairs()
-        
-        if not queue_pairs:
-            logger.warning("No queues to process")
+    if death_count > config['max_retry_count']:
+        fp = get_fingerprint(properties, body)
+        if fp in processed_ids:
+            logger.info(f"Duplicate, skipping: {fp}")
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+            stats['skipped'] += 1
+            queue_stats[dlq_name]['skipped'] += 1
             return
         
-        logger.info(f"Processing {len(queue_pairs)} queue pair(s)")
-        
-        for dlq_name, target_queue in queue_pairs:
-            logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
-            self._process_single_dlq(dlq_name, target_queue)
-        
-        logger.info(f"Total - Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
-    
-    def _process_single_dlq(self, dlq_name: str, target_queue: str):
-        """Process a single DLQ."""
-        self.ensure_target_queue_exists(target_queue)
-        
+        logger.warning(f"Exceeded limit ({death_count}>{config['max_retry_count']}), moving to {target_queue}")
         try:
-            queue_info = self.channel.queue_declare(queue=dlq_name, passive=True)
-        except pika.exceptions.ChannelClosedByBroker:
-            logger.error(f"DLQ '{dlq_name}' does not exist")
-            raise
-        
-        message_count = queue_info.method.message_count
-        
-        logger.info(f"DLQ '{dlq_name}' has {message_count} messages")
-        
-        if message_count == 0:
-            return
-        
-        while True:
-            method_frame, properties, body = self.channel.basic_get(queue=dlq_name, auto_ack=False)
-            if method_frame is None:
-                break
-            self.process_message(self.channel, method_frame, properties, body, target_queue, dlq_name)
-    
-    def close(self):
-        """Close the RabbitMQ connection."""
-        if self.connection and not self.connection.is_closed:
-            self.connection.close()
-            logger.info("Connection closed")
-    
-    def get_result_dict(self) -> Dict[str, Any]:
-        """Get execution results as a dictionary."""
-        duration = (self.end_time - self.start_time).total_seconds() if self.start_time and self.end_time else None
-        
-        result = {
-            'status': 'success' if self.success else 'error',
-            'timestamp': datetime.now().isoformat(),
-            'config': {
-                'dlq_name': self.config.DLQ_NAME,
-                'target_queue': self.config.TARGET_QUEUE,
-                'max_retry_count': self.config.MAX_RETRY_COUNT
-            },
-            'results': {
-                'messages_processed': self.messages_processed,
-                'messages_moved': self.messages_moved,
-                'messages_requeued': self.messages_requeued,
-                'messages_skipped': self.messages_skipped,
-                'duration_seconds': duration
-            }
-        }
-        
-        if len(self.queue_stats) > 1:
-            result['queue_statistics'] = self.queue_stats
-        
-        return result
-    
-    def output_results(self):
-        """Output results in the configured format."""
-        if self.output_format == 'json':
-            print(json.dumps(self.get_result_dict(), indent=2))
-        else:
-            print(f"\nStatus: {'SUCCESS' if self.success else 'ERROR'}")
-            print(f"Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
-    
-    def run(self) -> bool:
-        """Main execution method."""
-        self.start_time = datetime.now()
-        
-        try:
-            if not self.connect():
-                self.success = False
-                return False
-            
-            self.check_dlq()
-            self.success = True
-            return True
-        except KeyboardInterrupt:
-            logger.info("Interrupted")
-            self.success = False
-            return False
+            props = pika.BasicProperties(
+                content_type=getattr(properties, 'content_type', None),
+                content_encoding=getattr(properties, 'content_encoding', None),
+                headers=getattr(properties, 'headers', None),
+                priority=getattr(properties, 'priority', None),
+                correlation_id=getattr(properties, 'correlation_id', None),
+                reply_to=getattr(properties, 'reply_to', None),
+                expiration=getattr(properties, 'expiration', None),
+                message_id=getattr(properties, 'message_id', None),
+                timestamp=getattr(properties, 'timestamp', None),
+                type=getattr(properties, 'type', None),
+                user_id=getattr(properties, 'user_id', None),
+                app_id=getattr(properties, 'app_id', None),
+                cluster_id=getattr(properties, 'cluster_id', None),
+                delivery_mode=2
+            )
+            channel.basic_publish(exchange='', routing_key=target_queue, body=body, properties=props, mandatory=True)
+            save_processed_id(fp)
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+            stats['moved'] += 1
+            queue_stats[dlq_name]['moved'] += 1
+        except pika.exceptions.UnroutableError as e:
+            logger.error(f"Unroutable: {e}")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         except Exception as e:
-            logger.error(f"Error: {e}")
-            self.success = False
-            return False
-        finally:
-            self.end_time = datetime.now()
-            self.close()
-            self.output_results()
+            logger.error(f"Move failed: {e}")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+    else:
+        logger.info(f"Within limit ({death_count}), requeuing")
+        channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        stats['requeued'] += 1
+        queue_stats[dlq_name]['requeued'] += 1
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='RabbitMQ DLQ Retry Checker')
+def process_dlq(dlq_name, target_queue):
+    """Process all messages in a DLQ."""
+    ensure_queue(target_queue)
     
-    parser.add_argument('--host', help='RabbitMQ host')
-    parser.add_argument('--port', type=int, help='RabbitMQ port')
-    parser.add_argument('--mgmt-port', type=int, dest='mgmt_port', help='Management API port')
-    parser.add_argument('--username', help='RabbitMQ username')
-    parser.add_argument('--password', help='RabbitMQ password')
-    parser.add_argument('--vhost', help='RabbitMQ virtual host')
-    parser.add_argument('--ssl', action='store_true', help='Use SSL/TLS')
-    parser.add_argument('--no-ssl-verify', action='store_true', dest='no_ssl_verify', help='Disable SSL certificate verification (for self-signed certs)')
-    parser.add_argument('--dlq', help='Dead Letter Queue name')
-    parser.add_argument('--target-queue', help='Target queue for failed messages')
-    parser.add_argument('--max-retries', type=int, help='Max retry count')
-    parser.add_argument('--dedup-file', dest='dedup_file', help='File to store processed message IDs for deduplication')
-    parser.add_argument('--dedup-max-age-hours', type=int, dest='dedup_max_age_hours', help='Max age in hours for dedup entries (default: 168)')
-    parser.add_argument('--config', help='Path to YAML config file')
-    parser.add_argument('--output-format', choices=['text', 'json'], default='text', help='Output format')
-    parser.add_argument('--quiet', action='store_true', help='Suppress log output')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
+    try:
+        info = channel.queue_declare(queue=dlq_name, passive=True)
+    except pika.exceptions.ChannelClosedByBroker:
+        logger.error(f"DLQ '{dlq_name}' does not exist")
+        raise
     
-    return parser.parse_args()
+    count = info.method.message_count
+    logger.info(f"DLQ '{dlq_name}' has {count} messages")
+    
+    while True:
+        method, properties, body = channel.basic_get(queue=dlq_name, auto_ack=False)
+        if method is None:
+            break
+        process_message(method, properties, body, target_queue, dlq_name)
+
+
+def run():
+    """Main execution."""
+    load_processed_ids()
+    
+    if not connect():
+        return False
+    
+    try:
+        pairs = get_queue_pairs()
+        if not pairs:
+            logger.warning("No queues to process")
+            return True
+        
+        logger.info(f"Processing {len(pairs)} queue pair(s)")
+        for dlq, target in pairs:
+            logger.info(f"Processing: '{dlq}' -> '{target}'")
+            process_dlq(dlq, target)
+        
+        logger.info(f"Total - Processed: {stats['processed']}, Moved: {stats['moved']}, Requeued: {stats['requeued']}, Skipped: {stats['skipped']}")
+        return True
+    except KeyboardInterrupt:
+        logger.info("Interrupted")
+        return False
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return False
+    finally:
+        close()
 
 
 def main():
-    """Main entry point."""
-    args = parse_arguments()
+    """Entry point."""
+    global config
     
-    if args.quiet:
-        logging.getLogger().setLevel(logging.ERROR)
-    elif args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} config.yaml", file=sys.stderr)
+        sys.exit(1)
     
-    config = Config()
+    config_file = sys.argv[1]
+    if not os.path.exists(config_file):
+        print(f"Config file not found: {config_file}", file=sys.stderr)
+        sys.exit(1)
     
-    if args.config:
-        logger.info(f"Loading configuration from {args.config}")
-        config.load_from_file(args.config)
-    
-    config.update_from_args(args)
+    logger.info(f"Loading config from {config_file}")
+    config = load_config(config_file)
     
     logger.info("Starting RabbitMQ Retry Checker")
+    success = run()
     
-    checker = RMQRetryChecker(config, output_format=args.output_format)
-    success = checker.run()
+    print(f"\nStatus: {'SUCCESS' if success else 'ERROR'}")
+    print(f"Processed: {stats['processed']}, Moved: {stats['moved']}, Requeued: {stats['requeued']}, Skipped: {stats['skipped']}")
     
     sys.exit(0 if success else 1)
 

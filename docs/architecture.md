@@ -60,14 +60,6 @@ flowchart TD
     G --> J[Target: dead.payments]
 ```
 
-## Components
-
-| Component | Description |
-|-----------|-------------|
-| `Config` | Handles configuration from files, environment variables, and CLI |
-| `RMQRetryChecker` | Main class that connects to RabbitMQ and processes messages |
-| Management API | Used only when wildcard patterns are specified |
-
 ## Message Persistence
 
 The tool uses RabbitMQ's publisher confirms to ensure no messages are lost during processing:
@@ -115,17 +107,9 @@ flowchart TD
     F --> G[Ack Original]
 ```
 
-**Configuration:**
+**Configuration (in config.yaml):**
 
-```bash
-# CLI
-python rmq_retry_checker.py --dedup-file /var/lib/rmq/processed.ids --dedup-max-age-hours 24
-
-# Environment variable
-export DEDUP_FILE=/var/lib/rmq/processed.ids
-export DEDUP_MAX_AGE_HOURS=24
-
-# Config file (queues section)
+```yaml
 queues:
   dedup_file: /var/lib/rmq/processed.ids
   dedup_max_age_hours: 24

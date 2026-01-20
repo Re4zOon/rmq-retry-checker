@@ -16,57 +16,51 @@ The tool checks `x-death` count on messages and moves those exceeding the retry 
 ## Quick Start
 
 ```bash
-# Install dependencies (pika, pyyaml, python-dotenv)
+# Install dependencies (pika, pyyaml)
 pip install -r requirements.txt
 
 # Run with config file
-python rmq_retry_checker.py --config config.yaml
-
-# Or with command line options
-python rmq_retry_checker.py --dlq my_dlq --target-queue failed_queue --max-retries 3
+python rmq_retry_checker.py config.yaml
 ```
 
 ## Configuration
 
-Create `config.yaml` (minimal example):
+Create `config.yaml`:
 
 ```yaml
 rabbitmq:
   host: localhost
   port: 5672
+  mgmt_port: 15672    # Required for wildcard support
   username: guest
   password: guest
-  # vhost: /              # Optional, defaults to /
-  # use_ssl: false        # Optional, enable for TLS
-  # ssl_verify: true      # Optional, set false for self-signed certs
+  vhost: /
+  use_ssl: false
+  ssl_verify: true    # Set false for self-signed certs
 
 queues:
   dlq_name: my_dlq                        # Supports wildcards: dlq.*
   target_queue: permanent_failure_queue   # Supports wildcards: dead.*
   max_retry_count: 3
+  dedup_file: .rmq_processed_ids          # File to track processed messages
+  dedup_max_age_hours: 168                # Auto-cleanup entries older than N hours
 ```
 
 See [Configuration Guide](docs/configuration.md) for all options.
 
 ## Wildcard Support
 
-Process multiple queues at once:
+Process multiple queues at once using patterns:
 
-```bash
-python rmq_retry_checker.py --dlq "dlq.*" --target-queue "dead.*"
+```yaml
+queues:
+  dlq_name: "dlq.*"
+  target_queue: "dead.*"
 ```
 
 This matches `dlq.orders`, `dlq.users`, etc. and creates corresponding `dead.orders`, `dead.users` targets.
 
-## Output Formats
-
-```bash
-# Human-readable (default)
-python rmq_retry_checker.py
-
-# JSON (for automation)
-python rmq_retry_checker.py --output-format json --quiet
-```
+**Note:** Wildcards require the RabbitMQ Management API (default port 15672).
 
 ## Documentation
 
