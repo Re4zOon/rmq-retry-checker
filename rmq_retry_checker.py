@@ -206,8 +206,12 @@ class RMQRetryChecker:
                 timestamp = datetime.now().isoformat()
                 with open(dedup_file, 'a') as f:
                     f.write(f"{fingerprint}:{timestamp}\n")
+                    f.flush()
+                # Only add to in-memory set after successful file write and flush
                 self.processed_ids.add(fingerprint)
             except Exception as e:
+                # Don't add to in-memory set if file write fails
+                # This ensures in-memory state never gets ahead of persisted state
                 logger.warning(f"Failed to save to dedup file: {e}")
     
     def _is_already_processed(self, fingerprint: str) -> bool:
