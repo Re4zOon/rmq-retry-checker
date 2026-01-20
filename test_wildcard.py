@@ -178,6 +178,9 @@ class TestWildcardFunctionality(unittest.TestCase):
     @patch.object(RMQRetryChecker, 'list_queues_from_api')
     def test_get_matching_queue_pairs_with_wildcard(self, mock_list_queues):
         """Test getting queue pairs with wildcard in DLQ name"""
+        # Expected number of matching DLQ queues
+        EXPECTED_MATCHES = 3
+        
         # Mock the API to return some queues
         mock_list_queues.return_value = [
             'dlq.queue1',
@@ -193,8 +196,8 @@ class TestWildcardFunctionality(unittest.TestCase):
         checker = RMQRetryChecker(self.config)
         pairs = checker.get_matching_queue_pairs()
         
-        # Should return three pairs (only queues matching dlq.*)
-        self.assertEqual(len(pairs), 3)
+        # Should return EXPECTED_MATCHES pairs (only queues matching dlq.*)
+        self.assertEqual(len(pairs), EXPECTED_MATCHES)
         
         # Verify the pairs are correctly derived
         expected_pairs = [

@@ -52,8 +52,8 @@ def demonstrate_wildcard_setup():
         'dlq.payments',
         'dlq.orders',
         'dlq.inventory',
-        'other_queue',  # This won't match the pattern
-        'dead.queue1',  # This won't match the dlq.* pattern
+        'other_queue',  # Doesn't match: missing 'dlq.' prefix
+        'dead.queue1',  # Doesn't match: has 'dead.' prefix not 'dlq.'
     ]
     
     print("Simulated RabbitMQ Queues:")

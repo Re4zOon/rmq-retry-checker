@@ -156,6 +156,7 @@ queues:
 
 ```bash
 # Process DLQs with dot notation (dlq.queue1 -> dead.queue1)
+# Note: Requires RabbitMQ Management API to be enabled and accessible
 python rmq_retry_checker.py --dlq "dlq.*" --target-queue "dead.*"
 
 # Process all service DLQs with matching target queues

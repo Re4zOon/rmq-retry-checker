@@ -20,7 +20,8 @@ queues:
   dlq_name: dlq.*
   
   # Wildcard pattern for target queues: dead.* derives dead.queue1, dead.queue2, etc.
-  # The portion matched by * in dlq_name is substituted into target_queue
+  # The asterisk (*) captures everything after 'dlq.' and substitutes it after 'dead.'
+  # Example: dlq.queue1 -> the * captures 'queue1' -> dead.queue1
   target_queue: dead.*
   
   # Maximum number of retries before moving to the dead queue
