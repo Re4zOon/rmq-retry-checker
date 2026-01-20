@@ -236,9 +236,15 @@ class RMQRetryChecker:
         mgmt_port = self.config.RMQ_MGMT_PORT
         protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
         
+        # Validate and sanitize host to prevent URL injection
+        # Remove any invalid characters that could be used for injection
+        safe_host = self.config.RMQ_HOST.replace('/', '').replace('\\', '').replace('@', '')
+        if not safe_host or safe_host != self.config.RMQ_HOST:
+            raise ValueError(f"Invalid host value: {self.config.RMQ_HOST}")
+        
         # URL encode the vhost (/ becomes %2F)
         vhost_encoded = urllib.parse.quote(self.config.RMQ_VHOST, safe='')
-        url = f"{protocol}://{self.config.RMQ_HOST}:{mgmt_port}/api/queues/{vhost_encoded}"
+        url = f"{protocol}://{safe_host}:{mgmt_port}/api/queues/{vhost_encoded}"
         
         try:
             # Create request with basic auth
@@ -249,8 +255,15 @@ class RMQRetryChecker:
             request = urllib.request.Request(url)
             request.add_header('Authorization', f'Basic {auth_b64}')
             
+            # Configure SSL context for HTTPS
+            context = None
+            if self.config.RMQ_USE_SSL:
+                import ssl
+                # Create SSL context with certificate verification enabled
+                context = ssl.create_default_context()
+            
             # Make request
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=10, context=context) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 
             # Extract queue names
@@ -333,6 +346,9 @@ class RMQRetryChecker:
             
         Returns:
             Derived target queue name
+            
+        Raises:
+            ValueError: If unable to derive target queue name
         """
         # Convert wildcard pattern to regex to extract the matched parts
         # We need to handle * and ? separately
@@ -351,38 +367,42 @@ class RMQRetryChecker:
         
         match = re.match(dlq_regex, dlq_name)
         if not match:
-            # Shouldn't happen as dlq_name was matched by fnmatch, but fallback
-            logger.warning(f"Unable to derive target queue for {dlq_name}, using pattern as-is")
-            return target_pattern
+            # This shouldn't happen as dlq_name was matched by fnmatch
+            raise ValueError(
+                f"Unable to derive target queue for '{dlq_name}' using pattern '{dlq_pattern}'. "
+                f"This indicates a pattern matching inconsistency."
+            )
         
         # Get captured groups (the parts that matched wildcards)
-        captured_parts = match.groups()
+        captured_parts = list(match.groups())
         
-        # Now replace wildcards in target_pattern with captured parts in order
-        result = target_pattern
-        part_index = 0
+        # Replace wildcards in target_pattern with captured parts using re.sub
+        part_index = [0]  # Use list to allow modification in nested function
         
-        # Process each character in the target pattern
-        output = []
-        i = 0
-        while i < len(result):
-            if result[i] == '*':
-                # Replace with next captured part
-                if part_index < len(captured_parts):
-                    output.append(captured_parts[part_index])
-                    part_index += 1
-                i += 1
-            elif result[i] == '?':
-                # Replace with next captured part
-                if part_index < len(captured_parts):
-                    output.append(captured_parts[part_index])
-                    part_index += 1
-                i += 1
+        def replace_wildcard(match_obj):
+            """Replace wildcard with next captured part"""
+            if part_index[0] < len(captured_parts):
+                replacement = captured_parts[part_index[0]]
+                part_index[0] += 1
+                return replacement
             else:
-                output.append(result[i])
-                i += 1
+                # Not enough captured parts - this shouldn't happen if patterns are consistent
+                raise ValueError(
+                    f"Pattern mismatch: target pattern '{target_pattern}' has more wildcards "
+                    f"than DLQ pattern '{dlq_pattern}'"
+                )
         
-        return ''.join(output)
+        # Replace both * and ? with captured parts in order
+        result = re.sub(r'[*?]', replace_wildcard, target_pattern)
+        
+        # Validate the result doesn't contain wildcards (which would be invalid queue name)
+        if '*' in result or '?' in result:
+            raise ValueError(
+                f"Derived queue name '{result}' contains wildcards, which is invalid. "
+                f"This indicates inconsistent patterns."
+            )
+        
+        return result
         
     def connect(self) -> bool:
         """
