@@ -4,12 +4,26 @@
 rabbitmq:
   host: localhost
   port: 5672
+  mgmt_port: 15672  # Management API port (required for wildcard support)
   username: guest
   password: guest
   vhost: /
   use_ssl: false
 
 queues:
+  # Queue names support wildcard patterns (* and ?)
+  # Examples:
+  #   - Specific queue: my_dlq
+  #   - Wildcard pattern: service_*_dlq (matches service_a_dlq, service_b_dlq, etc.)
+  #   - Multiple wildcards: *_retry_*
+  
   dlq_name: my_dlq
   target_queue: permanent_failure_queue
   max_retry_count: 3
+
+# Example with wildcards:
+# queues:
+#   dlq_name: service_*_dlq        # Matches all DLQs like service_a_dlq, service_b_dlq
+#   target_queue: service_*_failed  # Derives target as service_a_failed, service_b_failed
+#   max_retry_count: 3
+

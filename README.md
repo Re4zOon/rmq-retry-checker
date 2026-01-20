@@ -21,6 +21,7 @@ This script:
 
 - ✅ **Single-file script** - Easy to deploy in automation environments
 - ✅ **Multiple configuration methods** - Command-line args, config file (YAML), or environment variables (.env)
+- ✅ **Wildcard support** - Process multiple queues with pattern matching (e.g., `service_*_dlq`)
 - ✅ **Human and machine-readable output** - Text format for humans, JSON format for automation
 - ✅ Connects to RabbitMQ (supports quorum queues)
 - ✅ Inspects DLQ messages without removing them
@@ -122,6 +123,69 @@ python rmq_retry_checker.py
 | DLQ Name | `--dlq` | `queues.dlq_name` | `DLQ_NAME` | `my_dlq` |
 | Target Queue | `--target-queue` | `queues.target_queue` | `TARGET_QUEUE` | `permanent_failure_queue` |
 | Max Retries | `--max-retries` | `queues.max_retry_count` | `MAX_RETRY_COUNT` | `3` |
+
+### Wildcard Support
+
+The script supports wildcard patterns in queue names, allowing you to process multiple queues with a single configuration. This is useful when you have many queues following a naming convention.
+
+**Supported wildcards:**
+- `*` - Matches any sequence of characters
+- `?` - Matches any single character
+
+**Example patterns:**
+```yaml
+queues:
+  dlq_name: service_*_dlq          # Matches: service_a_dlq, service_b_dlq, service_auth_dlq
+  target_queue: service_*_failed    # Derives: service_a_failed, service_b_failed, service_auth_failed
+  max_retry_count: 3
+```
+
+**How it works:**
+1. When wildcards are detected in the DLQ name, the script queries the RabbitMQ Management API to list all queues
+2. Queues matching the DLQ pattern are identified
+3. For each matched DLQ, the corresponding target queue is derived:
+   - If the target queue has wildcards, the matched portion from the DLQ name replaces the wildcard
+   - If the target queue is fixed (no wildcards), all DLQs use the same target queue
+
+**Requirements for wildcard support:**
+- RabbitMQ Management plugin must be enabled (typically runs on port 15672)
+- The script needs access to the Management API endpoint
+- The user credentials must have permissions to list queues
+
+**Examples:**
+
+```bash
+# Process all service DLQs with matching target queues
+python rmq_retry_checker.py --dlq "service_*_dlq" --target-queue "service_*_failed"
+
+# Process all DLQs ending with '_retry' and send to a single failure queue
+python rmq_retry_checker.py --dlq "*_retry" --target-queue "all_failures"
+
+# Using config file
+cat > config.yaml << EOF
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: admin
+  password: secret
+
+queues:
+  dlq_name: "app_*_dlq"
+  target_queue: "app_*_permanent_failure"
+  max_retry_count: 5
+EOF
+
+python rmq_retry_checker.py --config config.yaml
+```
+
+**Pattern matching examples:**
+
+| DLQ Pattern | Target Pattern | Matched DLQ | Derived Target |
+|-------------|----------------|-------------|----------------|
+| `service_*_dlq` | `service_*_failed` | `service_auth_dlq` | `service_auth_failed` |
+| `*_retry` | `*_dead` | `orders_retry` | `orders_dead` |
+| `app_*_dlq` | `failures` | `app_payments_dlq` | `failures` |
+| `*_dlq_*` | `*_failed_*` | `v1_dlq_orders` | `v1_failed_orders` |
 
 ## Usage
 
