@@ -25,6 +25,7 @@ queues:
   dlq_name: my_dlq                        # Supports wildcards: dlq.*
   target_queue: permanent_failure_queue   # Supports wildcards: dead.*
   max_retry_count: 3
+  dedup_file: .rmq_processed_ids          # File to track processed messages
 ```
 
 ## Environment Variables
@@ -44,6 +45,7 @@ Create a `.env` file or export variables:
 | `DLQ_NAME` | my_dlq | DLQ name or pattern |
 | `TARGET_QUEUE` | permanent_failure_queue | Target queue or pattern |
 | `MAX_RETRY_COUNT` | 3 | Retry threshold |
+| `DEDUP_FILE` | .rmq_processed_ids | File to track processed message IDs |
 
 ## Command-Line Options
 
@@ -61,6 +63,7 @@ Create a `.env` file or export variables:
 | `--dlq` | DLQ name (supports wildcards) |
 | `--target-queue` | Target queue for failed messages |
 | `--max-retries` | Max retry count |
+| `--dedup-file` | File to store processed message IDs |
 | `--output-format` | `text` or `json` |
 | `--quiet` | Suppress logs |
 | `--verbose` | Verbose logging |

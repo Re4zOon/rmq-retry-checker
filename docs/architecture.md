@@ -92,6 +92,38 @@ flowchart TD
 | Scenario | Outcome |
 |----------|---------|
 | Script dies before publish | Message remains in DLQ (no loss) |
-| Script dies after publish, before ack | Message may be duplicated (acceptable) |
+| Script dies after publish, before ack | Message detected as duplicate on restart |
 | Broker rejects publish | Message remains in DLQ, error logged |
 | Network failure during publish | Message remains in DLQ (no loss) |
+
+## Deduplication
+
+To prevent duplicate messages in the target queue (e.g., if the script crashes after publishing but before acknowledging), the tool tracks processed message IDs:
+
+1. **Message Fingerprint**: Each message is identified by its `message_id` property. If no `message_id` is present, a SHA-256 hash of the body is used as fallback.
+2. **Dedup File**: Processed message fingerprints are stored in a local file (default: `.rmq_processed_ids`).
+3. **Skip Duplicates**: Before publishing, the tool checks if the fingerprint exists. If found, the message is acknowledged without republishing.
+
+```mermaid
+flowchart TD
+    A[Get Message from DLQ] --> B[Generate Fingerprint]
+    B --> C{Already Processed?}
+    C -->|Yes| D[Ack & Skip]
+    C -->|No| E[Publish to Target]
+    E --> F[Save Fingerprint]
+    F --> G[Ack Original]
+```
+
+**Configuration:**
+
+```bash
+# CLI
+python rmq_retry_checker.py --dedup-file /var/lib/rmq/processed.ids
+
+# Environment variable
+export DEDUP_FILE=/var/lib/rmq/processed.ids
+
+# Config file (queues section)
+queues:
+  dedup_file: /var/lib/rmq/processed.ids
+```

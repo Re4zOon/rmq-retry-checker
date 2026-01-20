@@ -17,7 +17,8 @@ import urllib.request
 import urllib.parse
 import base64
 import ssl
-from typing import Optional, Dict, Any, List, Tuple
+import hashlib
+from typing import Optional, Dict, Any, List, Tuple, Set
 from datetime import datetime
 
 import pika
@@ -53,6 +54,7 @@ class Config:
         self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
         self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
         self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', '3'))
+        self.DEDUP_FILE = os.getenv('DEDUP_FILE', '.rmq_processed_ids')
     
     @staticmethod
     def has_wildcard(pattern: str) -> bool:
@@ -85,6 +87,7 @@ class Config:
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
             self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
+            self.DEDUP_FILE = queues.get('dedup_file', self.DEDUP_FILE)
     
     def update_from_args(self, args: argparse.Namespace):
         if args.host:
@@ -109,6 +112,8 @@ class Config:
             self.TARGET_QUEUE = args.target_queue
         if args.max_retries is not None:
             self.MAX_RETRY_COUNT = args.max_retries
+        if args.dedup_file:
+            self.DEDUP_FILE = args.dedup_file
 
 
 class RMQRetryChecker:
@@ -122,10 +127,48 @@ class RMQRetryChecker:
         self.messages_processed = 0
         self.messages_moved = 0
         self.messages_requeued = 0
+        self.messages_skipped = 0
         self.start_time = None
         self.end_time = None
         self.success = False
         self.queue_stats: Dict[str, Dict[str, int]] = {}
+        self.processed_ids: Set[str] = set()
+        self._load_processed_ids()
+    
+    def _get_message_fingerprint(self, properties, body: bytes) -> str:
+        """Generate a unique fingerprint for a message using message_id or body hash."""
+        if properties.message_id:
+            return f"id:{properties.message_id}"
+        # Fallback to body hash if no message_id
+        body_hash = hashlib.sha256(body).hexdigest()[:16]
+        return f"hash:{body_hash}"
+    
+    def _load_processed_ids(self):
+        """Load previously processed message IDs from dedup file."""
+        dedup_file = self.config.DEDUP_FILE
+        if dedup_file and os.path.exists(dedup_file):
+            try:
+                with open(dedup_file, 'r') as f:
+                    self.processed_ids = set(line.strip() for line in f if line.strip())
+                logger.info(f"Loaded {len(self.processed_ids)} processed message IDs from {dedup_file}")
+            except Exception as e:
+                logger.warning(f"Failed to load dedup file: {e}")
+    
+    def _save_processed_id(self, fingerprint: str):
+        """Append a processed message ID to the dedup file."""
+        dedup_file = self.config.DEDUP_FILE
+        if dedup_file:
+            try:
+                with open(dedup_file, 'a') as f:
+                    f.write(f"{fingerprint}\n")
+                self.processed_ids.add(fingerprint)
+            except Exception as e:
+                logger.warning(f"Failed to save to dedup file: {e}")
+    
+    def _is_already_processed(self, fingerprint: str) -> bool:
+        """Check if a message has already been processed."""
+        return fingerprint in self.processed_ids
+    
     
     def list_queues_from_api(self) -> List[str]:
         """List all queues from RabbitMQ Management API."""
@@ -263,13 +306,22 @@ class RMQRetryChecker:
         self.messages_processed += 1
         
         if dlq_name not in self.queue_stats:
-            self.queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0}
+            self.queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
         self.queue_stats[dlq_name]['processed'] += 1
         
         death_count = self.get_death_count(properties.headers or {})
         logger.info(f"Message {self.messages_processed}: x-death count={death_count}")
         
         if death_count > self.config.MAX_RETRY_COUNT:
+            # Check for duplicates before moving
+            fingerprint = self._get_message_fingerprint(properties, body)
+            if self._is_already_processed(fingerprint):
+                logger.info(f"Message already processed (duplicate), skipping: {fingerprint}")
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                self.messages_skipped += 1
+                self.queue_stats[dlq_name]['skipped'] += 1
+                return
+            
             logger.warning(f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}), moving to {target_queue}")
             try:
                 # Copy properties and ensure persistence with delivery_mode=2
@@ -290,6 +342,8 @@ class RMQRetryChecker:
                     properties=persistent_properties,
                     mandatory=True
                 )
+                # Record the message as processed BEFORE acking to prevent duplicates on crash
+                self._save_processed_id(fingerprint)
                 # Only ack after broker confirms the publish succeeded
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 self.messages_moved += 1
@@ -320,7 +374,7 @@ class RMQRetryChecker:
             logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
             self._process_single_dlq(dlq_name, target_queue)
         
-        logger.info(f"Total - Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}")
+        logger.info(f"Total - Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
     
     def _process_single_dlq(self, dlq_name: str, target_queue: str):
         """Process a single DLQ."""
@@ -367,6 +421,7 @@ class RMQRetryChecker:
                 'messages_processed': self.messages_processed,
                 'messages_moved': self.messages_moved,
                 'messages_requeued': self.messages_requeued,
+                'messages_skipped': self.messages_skipped,
                 'duration_seconds': duration
             }
         }
@@ -382,7 +437,7 @@ class RMQRetryChecker:
             print(json.dumps(self.get_result_dict(), indent=2))
         else:
             print(f"\nStatus: {'SUCCESS' if self.success else 'ERROR'}")
-            print(f"Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}")
+            print(f"Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
     
     def run(self) -> bool:
         """Main execution method."""
@@ -425,6 +480,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--dlq', help='Dead Letter Queue name')
     parser.add_argument('--target-queue', help='Target queue for failed messages')
     parser.add_argument('--max-retries', type=int, help='Max retry count')
+    parser.add_argument('--dedup-file', dest='dedup_file', help='File to store processed message IDs for deduplication')
     parser.add_argument('--config', help='Path to YAML config file')
     parser.add_argument('--output-format', choices=['text', 'json'], default='text', help='Output format')
     parser.add_argument('--quiet', action='store_true', help='Suppress log output')
