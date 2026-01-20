@@ -391,11 +391,12 @@ class RMQRetryChecker:
                     properties=persistent_properties,
                     mandatory=True
                 )
-                # Only ack after broker confirms the publish succeeded
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                # Record the message as processed AFTER acking to avoid marking
-                # messages as processed when they haven't actually been moved
+                # After the broker confirms the publish, record the message as processed
+                # before acknowledging the original DLQ message. This avoids a window where
+                # the DLQ message is acked but the fingerprint is not yet saved.
                 self._save_processed_id(fingerprint)
+                # Only ack after both publish and dedup record have succeeded
+                ch.basic_ack(delivery_tag=method.delivery_tag)
                 self.messages_moved += 1
                 self.queue_stats[dlq_name]['moved'] += 1
             except pika.exceptions.UnroutableError as e:
