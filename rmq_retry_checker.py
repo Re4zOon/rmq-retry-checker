@@ -68,6 +68,7 @@ class Config:
         # RabbitMQ Connection Settings
         self.RMQ_HOST = os.getenv('RMQ_HOST', 'localhost')
         self.RMQ_PORT = int(os.getenv('RMQ_PORT', 5672))
+        self.RMQ_MGMT_PORT = int(os.getenv('RMQ_MGMT_PORT', 15672))
         self.RMQ_USERNAME = os.getenv('RMQ_USERNAME', 'guest')
         self.RMQ_PASSWORD = os.getenv('RMQ_PASSWORD', 'guest')
         self.RMQ_VHOST = os.getenv('RMQ_VHOST', '/')
@@ -136,6 +137,7 @@ class Config:
             rmq = config_data['rabbitmq']
             self.RMQ_HOST = rmq.get('host', self.RMQ_HOST)
             self.RMQ_PORT = int(rmq.get('port', self.RMQ_PORT))
+            self.RMQ_MGMT_PORT = int(rmq.get('mgmt_port', self.RMQ_MGMT_PORT))
             self.RMQ_USERNAME = rmq.get('username', self.RMQ_USERNAME)
             self.RMQ_PASSWORD = rmq.get('password', self.RMQ_PASSWORD)
             self.RMQ_VHOST = rmq.get('vhost', self.RMQ_VHOST)
@@ -174,6 +176,8 @@ class Config:
             self.RMQ_HOST = args.host
         if args.port:
             self.RMQ_PORT = args.port
+        if args.mgmt_port:
+            self.RMQ_MGMT_PORT = args.mgmt_port
         if args.username:
             self.RMQ_USERNAME = args.username
         if args.password:
@@ -228,8 +232,8 @@ class RMQRetryChecker:
         Raises:
             Exception: If unable to connect to Management API
         """
-        # RabbitMQ Management API typically runs on port 15672
-        mgmt_port = 15672
+        # RabbitMQ Management API port from configuration
+        mgmt_port = self.config.RMQ_MGMT_PORT
         protocol = 'https' if self.config.RMQ_USE_SSL else 'http'
         
         # URL encode the vhost (/ becomes %2F)
@@ -331,8 +335,19 @@ class RMQRetryChecker:
             Derived target queue name
         """
         # Convert wildcard pattern to regex to extract the matched parts
+        # We need to handle * and ? separately
+        # * matches any sequence of characters
+        # ? matches exactly one character
+        
+        # Build a regex from the dlq_pattern
         # Escape special regex characters except * and ?
-        dlq_regex = re.escape(dlq_pattern).replace(r'\*', '(.*)').replace(r'\?', '(.)')
+        dlq_regex = re.escape(dlq_pattern)
+        # Replace escaped wildcards with appropriate regex groups
+        # Use non-greedy matching for * to handle multiple wildcards correctly
+        dlq_regex = dlq_regex.replace(r'\*', '(.*?)')
+        dlq_regex = dlq_regex.replace(r'\?', '(.)')
+        # Ensure we match the entire string
+        dlq_regex = f'^{dlq_regex}$'
         
         match = re.match(dlq_regex, dlq_name)
         if not match:
@@ -343,16 +358,31 @@ class RMQRetryChecker:
         # Get captured groups (the parts that matched wildcards)
         captured_parts = match.groups()
         
-        # Replace wildcards in target_pattern with captured parts
+        # Now replace wildcards in target_pattern with captured parts in order
         result = target_pattern
-        for part in captured_parts:
-            # Replace first occurrence of * or ?
-            if '*' in result:
-                result = result.replace('*', part, 1)
-            elif '?' in result:
-                result = result.replace('?', part, 1)
+        part_index = 0
         
-        return result
+        # Process each character in the target pattern
+        output = []
+        i = 0
+        while i < len(result):
+            if result[i] == '*':
+                # Replace with next captured part
+                if part_index < len(captured_parts):
+                    output.append(captured_parts[part_index])
+                    part_index += 1
+                i += 1
+            elif result[i] == '?':
+                # Replace with next captured part
+                if part_index < len(captured_parts):
+                    output.append(captured_parts[part_index])
+                    part_index += 1
+                i += 1
+            else:
+                output.append(result[i])
+                i += 1
+        
+        return ''.join(output)
         
     def connect(self) -> bool:
         """
@@ -733,6 +763,7 @@ Configuration precedence (highest to lowest):
     conn_group = parser.add_argument_group('RabbitMQ Connection')
     conn_group.add_argument('--host', help='RabbitMQ host (default: localhost)')
     conn_group.add_argument('--port', type=int, help='RabbitMQ port (default: 5672)')
+    conn_group.add_argument('--mgmt-port', type=int, dest='mgmt_port', help='RabbitMQ Management API port (default: 15672, required for wildcard support)')
     conn_group.add_argument('--username', help='RabbitMQ username (default: guest)')
     conn_group.add_argument('--password', help=(
         'RabbitMQ password (default: guest). '
