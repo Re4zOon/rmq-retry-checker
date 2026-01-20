@@ -140,7 +140,7 @@ class RMQRetryChecker:
         if properties.message_id:
             return f"id:{properties.message_id}"
         # Fallback to body hash if no message_id
-        body_hash = hashlib.sha256(body).hexdigest()[:16]
+        body_hash = hashlib.sha256(body).hexdigest()[:32]
         return f"hash:{body_hash}"
     
     def _load_processed_ids(self):
@@ -326,7 +326,7 @@ class RMQRetryChecker:
             try:
                 # Copy properties and ensure persistence with delivery_mode=2
                 props_dict = {
-                    attr: getattr(properties, attr)
+                    attr: getattr(properties, attr, None)
                     for attr in ['content_type', 'content_encoding', 'headers', 'priority',
                                  'correlation_id', 'reply_to', 'expiration', 'message_id',
                                  'timestamp', 'type', 'user_id', 'app_id', 'cluster_id']
@@ -342,10 +342,11 @@ class RMQRetryChecker:
                     properties=persistent_properties,
                     mandatory=True
                 )
-                # Record the message as processed BEFORE acking to prevent duplicates on crash
-                self._save_processed_id(fingerprint)
                 # Only ack after broker confirms the publish succeeded
                 ch.basic_ack(delivery_tag=method.delivery_tag)
+                # Record the message as processed AFTER acking to avoid marking
+                # messages as processed when they haven't actually been moved
+                self._save_processed_id(fingerprint)
                 self.messages_moved += 1
                 self.queue_stats[dlq_name]['moved'] += 1
             except pika.exceptions.UnroutableError as e:
