@@ -138,8 +138,12 @@ class RMQRetryChecker:
         
         context = ssl.create_default_context() if self.config.RMQ_USE_SSL else None
         
-        with urllib.request.urlopen(request, timeout=10, context=context) as response:
-            data = json.loads(response.read().decode('utf-8'))
+        try:
+            with urllib.request.urlopen(request, timeout=10, context=context) as response:
+                data = json.loads(response.read().decode('utf-8'))
+        except Exception as e:
+            logger.error(f"Failed to list queues from Management API ({host}:{mgmt_port}): {e}")
+            raise
         
         return [q['name'] for q in data if 'name' in q]
     
@@ -285,7 +289,12 @@ class RMQRetryChecker:
         """Process a single DLQ."""
         self.ensure_target_queue_exists(target_queue)
         
-        queue_info = self.channel.queue_declare(queue=dlq_name, passive=True)
+        try:
+            queue_info = self.channel.queue_declare(queue=dlq_name, passive=True)
+        except pika.exceptions.ChannelClosedByBroker:
+            logger.error(f"DLQ '{dlq_name}' does not exist")
+            raise
+        
         message_count = queue_info.method.message_count
         
         logger.info(f"DLQ '{dlq_name}' has {message_count} messages")
