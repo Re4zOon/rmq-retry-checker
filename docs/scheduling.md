@@ -7,7 +7,7 @@ Run the checker periodically to continuously process DLQs.
 Run every 5 minutes:
 
 ```bash
-*/5 * * * * /usr/bin/python3 /opt/rmq_retry_checker.py --config /etc/rmq/config.yaml --quiet
+*/5 * * * * /usr/bin/python3 /opt/rmq_retry_checker.py /etc/rmq/config.yaml
 ```
 
 ## Systemd Timer
@@ -22,7 +22,7 @@ Description=RabbitMQ DLQ Retry Checker
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/rmq_retry_checker.py --config /etc/rmq/config.yaml --quiet
+ExecStart=/usr/bin/python3 /opt/rmq_retry_checker.py /etc/rmq/config.yaml
 ```
 
 ### Timer File

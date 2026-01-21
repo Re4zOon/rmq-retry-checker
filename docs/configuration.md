@@ -1,10 +1,6 @@
 # Configuration
 
-The tool supports three configuration methods (in order of precedence):
-
-1. Command-line arguments (highest)
-2. YAML config file
-3. Environment variables (lowest)
+All configuration is done through a YAML config file.
 
 ## Config File
 
@@ -27,52 +23,20 @@ queues:
   max_retry_count: 3
 ```
 
-## Environment Variables
+## Usage
 
-Create a `.env` file or export variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RMQ_HOST` | localhost | RabbitMQ host |
-| `RMQ_PORT` | 5672 | AMQP port |
-| `RMQ_MGMT_PORT` | 15672 | Management API port |
-| `RMQ_USERNAME` | guest | Username |
-| `RMQ_PASSWORD` | guest | Password |
-| `RMQ_VHOST` | / | Virtual host |
-| `RMQ_USE_SSL` | false | Enable SSL/TLS |
-| `RMQ_SSL_VERIFY` | true | Verify SSL certificates |
-| `DLQ_NAME` | my_dlq | DLQ name or pattern |
-| `TARGET_QUEUE` | permanent_failure_queue | Target queue or pattern |
-| `MAX_RETRY_COUNT` | 3 | Retry threshold |
-
-## Command-Line Options
-
-| Option | Description |
-|--------|-------------|
-| `--config FILE` | YAML config file path |
-| `--host` | RabbitMQ host |
-| `--port` | RabbitMQ port |
-| `--mgmt-port` | Management API port |
-| `--username` | RabbitMQ username |
-| `--password` | RabbitMQ password |
-| `--vhost` | Virtual host |
-| `--ssl` | Enable SSL/TLS |
-| `--no-ssl-verify` | Disable SSL certificate verification |
-| `--dlq` | DLQ name (supports wildcards) |
-| `--target-queue` | Target queue for failed messages |
-| `--max-retries` | Max retry count |
-| `--output-format` | `text` or `json` |
-| `--quiet` | Suppress logs |
-| `--verbose` | Verbose logging |
+```bash
+python rmq_retry_checker.py config.yaml
+```
 
 ## Wildcard Patterns
 
-Use `*` and `?` to match multiple queues:
+Use `*` and `?` to match multiple queues in your config file:
 
-```bash
-# Matches: dlq.orders, dlq.users, dlq.payments
-# Creates: dead.orders, dead.users, dead.payments
-python rmq_retry_checker.py --dlq "dlq.*" --target-queue "dead.*"
+```yaml
+queues:
+  dlq_name: "dlq.*"        # Matches: dlq.orders, dlq.users, dlq.payments
+  target_queue: "dead.*"   # Creates: dead.orders, dead.users, dead.payments
 ```
 
 **Note:** Wildcards require the RabbitMQ Management API (default port 15672).

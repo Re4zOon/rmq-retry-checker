@@ -16,19 +16,16 @@ The tool checks `x-death` count on messages and moves those exceeding the retry 
 ## Quick Start
 
 ```bash
-# Install dependencies (pika, pyyaml, python-dotenv)
+# Install dependencies
 pip install -r requirements.txt
 
 # Run with config file
-python rmq_retry_checker.py --config config.yaml
-
-# Or with command line options
-python rmq_retry_checker.py --dlq my_dlq --target-queue failed_queue --max-retries 3
+python rmq_retry_checker.py config.yaml
 ```
 
 ## Configuration
 
-Create `config.yaml` (minimal example):
+Create `config.yaml`:
 
 ```yaml
 rabbitmq:
@@ -36,6 +33,7 @@ rabbitmq:
   port: 5672
   username: guest
   password: guest
+  # mgmt_port: 15672     # Required for wildcard support
   # vhost: /              # Optional, defaults to /
   # use_ssl: false        # Optional, enable for TLS
   # ssl_verify: true      # Optional, set false for self-signed certs
@@ -50,23 +48,17 @@ See [Configuration Guide](docs/configuration.md) for all options.
 
 ## Wildcard Support
 
-Process multiple queues at once:
+Process multiple queues at once using wildcards in config.yaml:
 
-```bash
-python rmq_retry_checker.py --dlq "dlq.*" --target-queue "dead.*"
+```yaml
+queues:
+  dlq_name: "dlq.*"
+  target_queue: "dead.*"
 ```
 
 This matches `dlq.orders`, `dlq.users`, etc. and creates corresponding `dead.orders`, `dead.users` targets.
 
-## Output Formats
-
-```bash
-# Human-readable (default)
-python rmq_retry_checker.py
-
-# JSON (for automation)
-python rmq_retry_checker.py --output-format json --quiet
-```
+**Note:** Wildcards require the RabbitMQ Management API (default port 15672).
 
 ## Documentation
 
