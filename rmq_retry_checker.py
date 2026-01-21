@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 messages_processed = 0
 messages_moved = 0
 messages_requeued = 0
+queue_stats = {}  # Per-queue statistics: {queue_name: {'processed': N, 'moved': N, 'requeued': N}}
 
 
 # =============================================================================
@@ -184,6 +185,15 @@ def derive_target_queue(dlq_name, dlq_pattern, target_pattern):
     captured_parts = list(match.groups())
     parts_iter = iter(captured_parts)
 
+    # Count wildcards in target pattern to validate
+    target_wildcard_count = target_pattern.count('*') + target_pattern.count('?')
+    if target_wildcard_count != len(captured_parts):
+        raise ValueError(
+            f"Wildcard mismatch: target pattern '{target_pattern}' has {target_wildcard_count} wildcards "
+            f"but DLQ pattern '{dlq_pattern}' has {len(captured_parts)}. "
+            "Ensure both patterns have the same number of wildcards."
+        )
+
     def replace_wildcard(match_obj):
         return next(parts_iter)
 
@@ -247,20 +257,34 @@ def ensure_target_queue_exists(channel, target_queue):
     try:
         channel.queue_declare(queue=target_queue, durable=True, arguments={'x-queue-type': 'quorum'})
         logger.info(f"Target queue '{target_queue}' is ready (quorum)")
+    except pika.exceptions.ChannelClosedByBroker:
+        # The broker has closed the channel; it is no longer usable, so we cannot
+        # safely fall back to declaring a classic queue on this channel.
+        logger.error(
+            f"Failed to declare quorum queue '{target_queue}': channel closed by broker; "
+            "cannot fall back to classic queue on a closed channel."
+        )
+        raise
     except Exception:
+        # For other errors where the channel remains open, fall back to a classic queue.
         channel.queue_declare(queue=target_queue, durable=True)
         logger.info(f"Target queue '{target_queue}' is ready (classic)")
 
 
-def process_message(channel, method, properties, body, target_queue, max_retry_count):
+def process_message(channel, method, properties, body, target_queue, max_retry_count, dlq_name):
     """
     Process a single message from the DLQ.
 
     Safety: Messages are only acked AFTER successful publish to target queue.
     If publish fails, message is nacked and requeued (no loss).
     """
-    global messages_processed, messages_moved, messages_requeued
+    global messages_processed, messages_moved, messages_requeued, queue_stats
     messages_processed += 1
+
+    # Track per-queue statistics
+    if dlq_name not in queue_stats:
+        queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0}
+    queue_stats[dlq_name]['processed'] += 1
 
     death_count = get_death_count(properties.headers or {})
     logger.info(f"Message {messages_processed}: x-death count={death_count}")
@@ -276,6 +300,8 @@ def process_message(channel, method, properties, body, target_queue, max_retry_c
                              'correlation_id', 'reply_to', 'expiration', 'message_id',
                              'timestamp', 'type', 'user_id', 'app_id', 'cluster_id']
             }
+            # Filter out attributes that are not present (None) to avoid passing them explicitly
+            props_dict = {k: v for k, v in props_dict.items() if v is not None}
             props_dict['delivery_mode'] = 2  # persistent
             persistent_properties = pika.BasicProperties(**props_dict)
 
@@ -291,6 +317,7 @@ def process_message(channel, method, properties, body, target_queue, max_retry_c
             # Only ack after successful publish
             channel.basic_ack(delivery_tag=method.delivery_tag)
             messages_moved += 1
+            queue_stats[dlq_name]['moved'] += 1
         except pika.exceptions.UnroutableError as e:
             logger.error(f"Message unroutable to {target_queue}: {e}")
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
@@ -302,6 +329,7 @@ def process_message(channel, method, properties, body, target_queue, max_retry_c
         logger.info(f"Message retry count ({death_count}) within limit, requeuing")
         channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         messages_requeued += 1
+        queue_stats[dlq_name]['requeued'] += 1
 
 
 def process_dlq(channel, dlq_name, target_queue, max_retry_count):
@@ -325,7 +353,7 @@ def process_dlq(channel, dlq_name, target_queue, max_retry_count):
         method_frame, properties, body = channel.basic_get(queue=dlq_name, auto_ack=False)
         if method_frame is None:
             break
-        process_message(channel, method_frame, properties, body, target_queue, max_retry_count)
+        process_message(channel, method_frame, properties, body, target_queue, max_retry_count, dlq_name)
 
 
 # =============================================================================
@@ -334,10 +362,11 @@ def process_dlq(channel, dlq_name, target_queue, max_retry_count):
 
 def run(config):
     """Main execution function. Returns True on success, False on error."""
-    global messages_processed, messages_moved, messages_requeued
+    global messages_processed, messages_moved, messages_requeued, queue_stats
     messages_processed = 0
     messages_moved = 0
     messages_requeued = 0
+    queue_stats = {}
 
     connection, channel = connect_to_rabbitmq(config)
     if not connection:
@@ -356,6 +385,9 @@ def run(config):
             logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
             process_dlq(channel, dlq_name, target_queue, config['max_retry_count'])
 
+        # Log per-queue statistics
+        for q_name, stats in queue_stats.items():
+            logger.info(f"  {q_name}: Processed: {stats['processed']}, Moved: {stats['moved']}, Requeued: {stats['requeued']}")
         logger.info(f"Total - Processed: {messages_processed}, Moved: {messages_moved}, Requeued: {messages_requeued}")
         return True
     except KeyboardInterrupt:
