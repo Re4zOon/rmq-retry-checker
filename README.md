@@ -119,6 +119,16 @@ flowchart LR
     A3 --> B1
 ```
 
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| `load_config()` | Loads configuration from YAML file |
+| `connect_to_rabbitmq()` | Establishes connection with publisher confirms |
+| `process_message()` | Handles individual message logic |
+| `process_dlq()` | Processes all messages in a DLQ |
+| Management API | Used only when wildcard patterns are specified |
+
 ### Message Safety
 
 The tool uses RabbitMQ's publisher confirms to ensure no messages are lost:
