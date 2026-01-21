@@ -64,8 +64,10 @@ flowchart TD
 
 | Component | Description |
 |-----------|-------------|
-| `Config` | Handles configuration from files, environment variables, and CLI |
-| `RMQRetryChecker` | Main class that connects to RabbitMQ and processes messages |
+| `load_config()` | Loads configuration from YAML file |
+| `connect_to_rabbitmq()` | Establishes connection with publisher confirms |
+| `process_message()` | Handles individual message logic |
+| `process_dlq()` | Processes all messages in a DLQ |
 | Management API | Used only when wildcard patterns are specified |
 
 ## Message Persistence
