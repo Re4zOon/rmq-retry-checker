@@ -17,9 +17,8 @@ import urllib.request
 import urllib.parse
 import base64
 import ssl
-import hashlib
-from typing import Optional, Dict, Any, List, Tuple, Set
-from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
 
 import pika
 import yaml
@@ -54,8 +53,6 @@ class Config:
         self.DLQ_NAME = os.getenv('DLQ_NAME', 'my_dlq')
         self.TARGET_QUEUE = os.getenv('TARGET_QUEUE', 'permanent_failure_queue')
         self.MAX_RETRY_COUNT = int(os.getenv('MAX_RETRY_COUNT', '3'))
-        self.DEDUP_FILE = os.getenv('DEDUP_FILE', '.rmq_processed_ids')
-        self.DEDUP_MAX_AGE_HOURS = int(os.getenv('DEDUP_MAX_AGE_HOURS', '168'))
     
     @staticmethod
     def has_wildcard(pattern: str) -> bool:
@@ -88,8 +85,6 @@ class Config:
             self.DLQ_NAME = queues.get('dlq_name', self.DLQ_NAME)
             self.TARGET_QUEUE = queues.get('target_queue', self.TARGET_QUEUE)
             self.MAX_RETRY_COUNT = int(queues.get('max_retry_count', self.MAX_RETRY_COUNT))
-            self.DEDUP_FILE = queues.get('dedup_file', self.DEDUP_FILE)
-            self.DEDUP_MAX_AGE_HOURS = int(queues.get('dedup_max_age_hours', self.DEDUP_MAX_AGE_HOURS))
     
     def update_from_args(self, args: argparse.Namespace):
         if args.host:
@@ -114,10 +109,6 @@ class Config:
             self.TARGET_QUEUE = args.target_queue
         if args.max_retries is not None:
             self.MAX_RETRY_COUNT = args.max_retries
-        if args.dedup_file:
-            self.DEDUP_FILE = args.dedup_file
-        if args.dedup_max_age_hours is not None:
-            self.DEDUP_MAX_AGE_HOURS = args.dedup_max_age_hours
 
 
 class RMQRetryChecker:
@@ -131,93 +122,10 @@ class RMQRetryChecker:
         self.messages_processed = 0
         self.messages_moved = 0
         self.messages_requeued = 0
-        self.messages_skipped = 0
         self.start_time = None
         self.end_time = None
         self.success = False
         self.queue_stats: Dict[str, Dict[str, int]] = {}
-        self.processed_ids: Set[str] = set()
-        self._load_processed_ids()
-    
-    def _get_message_fingerprint(self, properties, body: bytes) -> str:
-        """Generate a unique fingerprint for a message using message_id or body hash."""
-        if properties and getattr(properties, "message_id", None):
-            return f"id:{properties.message_id}"
-        # Fallback to body hash if no message_id or no properties
-        body_hash = hashlib.sha256(body).hexdigest()
-        return f"hash:{body_hash}"
-    
-    def _load_processed_ids(self):
-        """Load previously processed message IDs from dedup file, cleaning up old entries."""
-        dedup_file = self.config.DEDUP_FILE
-        if not dedup_file or not os.path.exists(dedup_file):
-            return
-        
-        try:
-            cutoff_time = datetime.now() - timedelta(hours=self.config.DEDUP_MAX_AGE_HOURS)
-            valid_entries = []
-            total_entries = 0
-            
-            with open(dedup_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    total_entries += 1
-                    
-                    # Parse entry: fingerprint:timestamp or legacy fingerprint-only format
-                    if ':' in line and line.count(':') >= 2:
-                        # New format: fingerprint:timestamp (fingerprint may contain ':')
-                        parts = line.rsplit(':', 1)
-                        fingerprint = parts[0]
-                        try:
-                            timestamp = datetime.fromisoformat(parts[1])
-                            if timestamp >= cutoff_time:
-                                valid_entries.append((fingerprint, timestamp))
-                                self.processed_ids.add(fingerprint)
-                            # else: expired entry, skip it
-                        except ValueError:
-                            # Invalid timestamp, treat as legacy format
-                            self.processed_ids.add(line)
-                            valid_entries.append((line, datetime.now()))
-                    else:
-                        # Legacy format: just fingerprint, keep it with current time
-                        self.processed_ids.add(line)
-                        valid_entries.append((line, datetime.now()))
-            
-            # Rewrite file with only valid (non-expired) entries
-            with open(dedup_file, 'w') as f:
-                for fingerprint, timestamp in valid_entries:
-                    f.write(f"{fingerprint}:{timestamp.isoformat()}\n")
-            
-            removed_count = total_entries - len(valid_entries)
-            if removed_count > 0:
-                logger.info(f"Cleaned up {removed_count} expired entries from dedup file")
-            logger.info(f"Loaded {len(self.processed_ids)} processed message IDs from {dedup_file}")
-        except Exception as e:
-            logger.warning(f"Failed to load dedup file: {e}")
-    
-    def _save_processed_id(self, fingerprint: str):
-        """Append a processed message ID with timestamp to the dedup file."""
-        dedup_file = self.config.DEDUP_FILE
-        if dedup_file:
-            try:
-                timestamp = datetime.now().isoformat()
-                with open(dedup_file, 'a') as f:
-                    f.write(f"{fingerprint}:{timestamp}\n")
-                    f.flush()
-                # Only add to in-memory set after successful file write and flush
-                self.processed_ids.add(fingerprint)
-            except Exception as e:
-                # Don't add to in-memory set if file write fails
-                # This ensures in-memory state never gets ahead of persisted state
-                logger.warning(f"Failed to save to dedup file: {e}")
-    
-    def _is_already_processed(self, fingerprint: str) -> bool:
-        """Check if a message has already been processed."""
-        return fingerprint in self.processed_ids
-    
     
     def list_queues_from_api(self) -> List[str]:
         """List all queues from RabbitMQ Management API."""
@@ -355,22 +263,13 @@ class RMQRetryChecker:
         self.messages_processed += 1
         
         if dlq_name not in self.queue_stats:
-            self.queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0, 'skipped': 0}
+            self.queue_stats[dlq_name] = {'processed': 0, 'moved': 0, 'requeued': 0}
         self.queue_stats[dlq_name]['processed'] += 1
         
         death_count = self.get_death_count(properties.headers or {})
         logger.info(f"Message {self.messages_processed}: x-death count={death_count}")
         
         if death_count > self.config.MAX_RETRY_COUNT:
-            # Check for duplicates before moving
-            fingerprint = self._get_message_fingerprint(properties, body)
-            if self._is_already_processed(fingerprint):
-                logger.info(f"Message already processed (duplicate), skipping: {fingerprint}")
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                self.messages_skipped += 1
-                self.queue_stats[dlq_name]['skipped'] += 1
-                return
-            
             logger.warning(f"Message exceeded retry limit ({death_count} > {self.config.MAX_RETRY_COUNT}), moving to {target_queue}")
             try:
                 # Copy properties and ensure persistence with delivery_mode=2
@@ -391,11 +290,6 @@ class RMQRetryChecker:
                     properties=persistent_properties,
                     mandatory=True
                 )
-                # After the broker confirms the publish, record the message as processed
-                # before acknowledging the original DLQ message. This avoids a window where
-                # the DLQ message is acked but the fingerprint is not yet saved.
-                self._save_processed_id(fingerprint)
-                # Only ack after both publish and dedup record have succeeded
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 self.messages_moved += 1
                 self.queue_stats[dlq_name]['moved'] += 1
@@ -425,7 +319,7 @@ class RMQRetryChecker:
             logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
             self._process_single_dlq(dlq_name, target_queue)
         
-        logger.info(f"Total - Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
+        logger.info(f"Total - Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}")
     
     def _process_single_dlq(self, dlq_name: str, target_queue: str):
         """Process a single DLQ."""
@@ -472,7 +366,6 @@ class RMQRetryChecker:
                 'messages_processed': self.messages_processed,
                 'messages_moved': self.messages_moved,
                 'messages_requeued': self.messages_requeued,
-                'messages_skipped': self.messages_skipped,
                 'duration_seconds': duration
             }
         }
@@ -488,7 +381,7 @@ class RMQRetryChecker:
             print(json.dumps(self.get_result_dict(), indent=2))
         else:
             print(f"\nStatus: {'SUCCESS' if self.success else 'ERROR'}")
-            print(f"Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}, Skipped: {self.messages_skipped}")
+            print(f"Processed: {self.messages_processed}, Moved: {self.messages_moved}, Requeued: {self.messages_requeued}")
     
     def run(self) -> bool:
         """Main execution method."""
@@ -531,8 +424,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--dlq', help='Dead Letter Queue name')
     parser.add_argument('--target-queue', help='Target queue for failed messages')
     parser.add_argument('--max-retries', type=int, help='Max retry count')
-    parser.add_argument('--dedup-file', dest='dedup_file', help='File to store processed message IDs for deduplication')
-    parser.add_argument('--dedup-max-age-hours', type=int, dest='dedup_max_age_hours', help='Max age in hours for dedup entries (default: 168)')
     parser.add_argument('--config', help='Path to YAML config file')
     parser.add_argument('--output-format', choices=['text', 'json'], default='text', help='Output format')
     parser.add_argument('--quiet', action='store_true', help='Suppress log output')

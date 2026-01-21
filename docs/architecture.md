@@ -92,41 +92,6 @@ flowchart TD
 | Scenario | Outcome |
 |----------|---------|
 | Script dies before publish | Message remains in DLQ (no loss) |
-| Script dies after publish, before ack | Message detected as duplicate on restart |
+| Script dies after publish, before ack | Message may be duplicated on restart |
 | Broker rejects publish | Message remains in DLQ, error logged |
 | Network failure during publish | Message remains in DLQ (no loss) |
-
-## Deduplication
-
-To prevent duplicate messages in the target queue (e.g., if the script crashes after publishing but before acknowledging), the tool tracks processed message IDs:
-
-1. **Message Fingerprint**: Each message is identified by its `message_id` property. If no `message_id` is present, a SHA-256 hash of the body is used as fallback.
-2. **Dedup File**: Processed message fingerprints are stored in a local file (default: `.rmq_processed_ids`) with timestamps.
-3. **Skip Duplicates**: Before publishing, the tool checks if the fingerprint exists. If found, the message is acknowledged without republishing.
-4. **Auto-Cleanup**: Entries older than the configured age (default: 168 hours / 7 days) are automatically removed on startup to prevent unbounded file growth.
-
-```mermaid
-flowchart TD
-    A[Get Message from DLQ] --> B[Generate Fingerprint]
-    B --> C{Already Processed?}
-    C -->|Yes| D[Ack & Skip]
-    C -->|No| E[Publish to Target]
-    E --> F[Save Fingerprint + Timestamp]
-    F --> G[Ack Original]
-```
-
-**Configuration:**
-
-```bash
-# CLI
-python rmq_retry_checker.py --dedup-file /var/lib/rmq/processed.ids --dedup-max-age-hours 24
-
-# Environment variable
-export DEDUP_FILE=/var/lib/rmq/processed.ids
-export DEDUP_MAX_AGE_HOURS=24
-
-# Config file (queues section)
-queues:
-  dedup_file: /var/lib/rmq/processed.ids
-  dedup_max_age_hours: 24
-```
