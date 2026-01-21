@@ -50,8 +50,15 @@ class Config:
         return '*' in pattern or '?' in pattern
     
     def _load_from_file(self, config_file):
-        with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+        try:
+            with open(config_file, 'r') as f:
+                config_data = yaml.safe_load(f)
+        except FileNotFoundError:
+            logger.error(f"Config file not found: {config_file}")
+            raise
+        except yaml.YAMLError as e:
+            logger.error(f"Invalid YAML in config file: {e}")
+            raise
         
         if config_data is None:
             return
@@ -350,6 +357,7 @@ class RMQRetryChecker:
 def main():
     """Main entry point."""
     if len(sys.argv) != 2:
+        print("Error: Expected exactly one argument (config file path)")
         print("Usage: python rmq_retry_checker.py <config.yaml>")
         sys.exit(1)
     
