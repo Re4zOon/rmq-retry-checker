@@ -31,7 +31,7 @@ flowchart LR
     
     subgraph Processing
         B0[Get Initial Message Count] --> B1[Get Message from DLQ]
-        B1 --> B2{Message Exists && Count > 0?}
+        B1 --> B2{Message Exists?}
         B2 -->|No| B4[Done]
         B2 -->|Yes| B3[Check x-death Count]
         B3 --> B5{Exceeds Limit?}
