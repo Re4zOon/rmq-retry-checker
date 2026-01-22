@@ -348,8 +348,10 @@ def process_dlq(channel, dlq_name, target_queue, max_retry_count):
     if message_count == 0:
         return
 
-    # Process all messages
-    while True:
+    # Process only the messages that were in the queue when we started.
+    # This prevents an infinite loop when messages are requeued (nack with requeue=True)
+    # back to the same DLQ - we won't process them again in this run.
+    for _ in range(message_count):
         method_frame, properties, body = channel.basic_get(queue=dlq_name, auto_ack=False)
         if method_frame is None:
             break

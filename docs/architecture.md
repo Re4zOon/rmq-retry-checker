@@ -30,18 +30,22 @@ flowchart LR
     end
     
     subgraph Processing
-        B1[Get Message from DLQ] --> B2{Message Exists?}
+        B0[Get Initial Message Count] --> B1[Get Message from DLQ]
+        B1 --> B2{Message Exists && Count > 0?}
         B2 -->|No| B4[Done]
         B2 -->|Yes| B3[Check x-death Count]
         B3 --> B5{Exceeds Limit?}
         B5 -->|Yes| B6[Move to Failure Queue]
         B5 -->|No| B7[Nack & Requeue]
-        B6 --> B1
-        B7 --> B1
+        B6 --> B8[Decrement Count]
+        B7 --> B8
+        B8 --> B1
     end
     
-    A3 --> B1
+    A3 --> B0
 ```
+
+> **Important:** The tool only processes the messages that were in the DLQ when processing started. Messages that are requeued (via nack with requeue=True) will remain in the DLQ but won't be processed again in the same run. This prevents infinite loops when the tool encounters messages that haven't exceeded the retry limit yet.
 
 ## Wildcard Resolution
 
