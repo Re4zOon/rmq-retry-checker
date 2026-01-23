@@ -252,46 +252,15 @@ def get_death_count(headers):
     return 0
 
 
-def ensure_target_queue_exists(connection, channel, target_queue):
+def ensure_target_queue_exists(channel, target_queue):
     """
-    Ensure the target queue exists.
+    Ensure the target queue exists using a passive declaration.
 
-    First checks if the queue already exists using a passive declaration.
-    If it exists, use it as-is (avoids PRECONDITION_FAILED errors from
-    mismatched arguments). If it doesn't exist, creates it as a quorum queue
-    (or classic if quorum fails).
-
-    Returns the channel to use (may be a new channel if the original was closed).
+    This does not create the queue - it only verifies it exists.
+    Raises ChannelClosedByBroker if the queue does not exist.
     """
-    # First, check if the queue already exists using passive declaration
-    try:
-        channel.queue_declare(queue=target_queue, passive=True)
-        logger.info(f"Target queue '{target_queue}' already exists")
-        return channel
-    except pika.exceptions.ChannelClosedByBroker as e:
-        if e.reply_code == 404:
-            # Queue doesn't exist - we'll create it below with a new channel
-            logger.info(f"Target queue '{target_queue}' does not exist, will create it")
-        else:
-            # Other error (e.g., permissions) - re-raise
-            raise
-
-    # Channel was closed by the passive declaration failure, create a new one
-    channel = connection.channel()
-    channel.confirm_delivery()
-
-    # Try to create as quorum queue first, fall back to classic
-    try:
-        channel.queue_declare(queue=target_queue, durable=True, arguments={'x-queue-type': 'quorum'})
-        logger.info(f"Target queue '{target_queue}' created (quorum)")
-    except pika.exceptions.ChannelClosedByBroker:
-        # Quorum queue creation failed, try classic queue with new channel
-        channel = connection.channel()
-        channel.confirm_delivery()
-        channel.queue_declare(queue=target_queue, durable=True)
-        logger.info(f"Target queue '{target_queue}' created (classic)")
-
-    return channel
+    channel.queue_declare(queue=target_queue, passive=True)
+    logger.info(f"Target queue '{target_queue}' is ready")
 
 
 def process_message(channel, method, properties, body, target_queue, max_retry_count, dlq_name):
@@ -355,9 +324,9 @@ def process_message(channel, method, properties, body, target_queue, max_retry_c
         queue_stats[dlq_name]['requeued'] += 1
 
 
-def process_dlq(connection, channel, dlq_name, target_queue, max_retry_count):
-    """Process all messages in a single DLQ. Returns the channel (may be new if recreated)."""
-    channel = ensure_target_queue_exists(connection, channel, target_queue)
+def process_dlq(channel, dlq_name, target_queue, max_retry_count):
+    """Process all messages in a single DLQ."""
+    ensure_target_queue_exists(channel, target_queue)
 
     try:
         queue_info = channel.queue_declare(queue=dlq_name, passive=True)
@@ -369,7 +338,7 @@ def process_dlq(connection, channel, dlq_name, target_queue, max_retry_count):
     logger.info(f"DLQ '{dlq_name}' has {message_count} messages")
 
     if message_count == 0:
-        return channel
+        return
 
     # Process only the messages that were in the queue when we started.
     # This prevents an infinite loop when messages are requeued (nack with requeue=True)
@@ -379,8 +348,6 @@ def process_dlq(connection, channel, dlq_name, target_queue, max_retry_count):
         if method_frame is None:
             break
         process_message(channel, method_frame, properties, body, target_queue, max_retry_count, dlq_name)
-
-    return channel
 
 
 # =============================================================================
@@ -410,7 +377,7 @@ def run(config):
 
         for dlq_name, target_queue in queue_pairs:
             logger.info(f"Processing DLQ: '{dlq_name}' -> Target: '{target_queue}'")
-            channel = process_dlq(connection, channel, dlq_name, target_queue, config['max_retry_count'])
+            process_dlq(channel, dlq_name, target_queue, config['max_retry_count'])
 
         # Log per-queue statistics
         for q_name, stats in queue_stats.items():
