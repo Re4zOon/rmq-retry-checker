@@ -63,11 +63,18 @@ def acquire_lock():
         _lock_file_handle.flush()
         logger.info(f"Lock acquired: {LOCK_FILE_PATH}")
         return True
+    except BlockingIOError:
+        # Lock is held by another process
+        if _lock_file_handle:
+            _lock_file_handle.close()
+            _lock_file_handle = None
+        logger.error("Cannot acquire lock - another instance is already running")
+        return False
     except (IOError, OSError) as e:
         if _lock_file_handle:
             _lock_file_handle.close()
             _lock_file_handle = None
-        logger.error(f"Cannot acquire lock - another instance may be running: {e}")
+        logger.error(f"Cannot acquire lock: {e}")
         return False
 
 
@@ -76,7 +83,6 @@ def release_lock():
     global _lock_file_handle
     if _lock_file_handle:
         try:
-            fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_UN)
             _lock_file_handle.close()
             logger.info("Lock released")
         except Exception as e:
