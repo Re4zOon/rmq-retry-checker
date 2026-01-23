@@ -259,8 +259,12 @@ def ensure_target_queue_exists(channel, target_queue):
     This does not create the queue - it only verifies it exists.
     Raises ChannelClosedByBroker if the queue does not exist.
     """
-    channel.queue_declare(queue=target_queue, passive=True)
-    logger.info(f"Target queue '{target_queue}' is ready")
+    try:
+        channel.queue_declare(queue=target_queue, passive=True)
+        logger.info(f"Target queue '{target_queue}' is ready")
+    except pika.exceptions.ChannelClosedByBroker:
+        logger.error(f"Target queue '{target_queue}' does not exist. Please create it before running.")
+        raise
 
 
 def process_message(channel, method, properties, body, target_queue, max_retry_count, dlq_name):
