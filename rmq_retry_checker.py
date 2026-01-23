@@ -253,22 +253,18 @@ def get_death_count(headers):
 
 
 def ensure_target_queue_exists(channel, target_queue):
-    """Ensure the target queue exists (tries quorum first, falls back to classic)."""
+    """
+    Ensure the target queue exists using a passive declaration.
+
+    This does not create the queue - it only verifies it exists.
+    Raises ChannelClosedByBroker if the queue does not exist.
+    """
     try:
-        channel.queue_declare(queue=target_queue, durable=True, arguments={'x-queue-type': 'quorum'})
-        logger.info(f"Target queue '{target_queue}' is ready (quorum)")
+        channel.queue_declare(queue=target_queue, passive=True)
+        logger.info(f"Target queue '{target_queue}' is ready")
     except pika.exceptions.ChannelClosedByBroker:
-        # The broker has closed the channel; it is no longer usable, so we cannot
-        # safely fall back to declaring a classic queue on this channel.
-        logger.error(
-            f"Failed to declare quorum queue '{target_queue}': channel closed by broker; "
-            "cannot fall back to classic queue on a closed channel."
-        )
+        logger.error(f"Target queue '{target_queue}' does not exist. Please create it before running.")
         raise
-    except Exception:
-        # For other errors where the channel remains open, fall back to a classic queue.
-        channel.queue_declare(queue=target_queue, durable=True)
-        logger.info(f"Target queue '{target_queue}' is ready (classic)")
 
 
 def process_message(channel, method, properties, body, target_queue, max_retry_count, dlq_name):
