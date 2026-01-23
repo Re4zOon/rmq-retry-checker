@@ -2,6 +2,16 @@
 
 Run the checker periodically to continuously process DLQs.
 
+## Lock File Protection
+
+The script uses a lock file (`/tmp/rmq_retry_checker.lock`) to prevent multiple instances from running simultaneously. If another instance is already running, the script will exit with an error message:
+
+```
+Another instance is already running
+```
+
+The lock is automatically released when the script exits (even on crash or kill).
+
 ## Cron
 
 Run every 5 minutes:

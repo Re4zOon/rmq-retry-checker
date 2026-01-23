@@ -17,6 +17,9 @@ import urllib.request
 import urllib.parse
 import base64
 import ssl
+import fcntl
+import atexit
+import os
 
 import pika
 import yaml
@@ -33,6 +36,53 @@ messages_processed = 0
 messages_moved = 0
 messages_requeued = 0
 queue_stats = {}  # Per-queue statistics: {queue_name: {'processed': N, 'moved': N, 'requeued': N}}
+
+
+# =============================================================================
+# Lock File (Prevent Parallel Execution)
+# =============================================================================
+
+LOCK_FILE_PATH = '/tmp/rmq_retry_checker.lock'
+_lock_file_handle = None
+
+
+def acquire_lock():
+    """
+    Acquire an exclusive lock to prevent parallel script execution.
+
+    Uses fcntl.flock() which automatically releases the lock when the
+    process exits (even on crash). Returns True if lock acquired,
+    False if another instance is already running.
+    """
+    global _lock_file_handle
+    try:
+        _lock_file_handle = open(LOCK_FILE_PATH, 'w')
+        fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Write PID to lock file for debugging purposes
+        _lock_file_handle.write(str(os.getpid()))
+        _lock_file_handle.flush()
+        logger.info(f"Lock acquired: {LOCK_FILE_PATH}")
+        return True
+    except (IOError, OSError) as e:
+        if _lock_file_handle:
+            _lock_file_handle.close()
+            _lock_file_handle = None
+        logger.error(f"Cannot acquire lock - another instance may be running: {e}")
+        return False
+
+
+def release_lock():
+    """Release the lock file."""
+    global _lock_file_handle
+    if _lock_file_handle:
+        try:
+            fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_UN)
+            _lock_file_handle.close()
+            logger.info("Lock released")
+        except Exception as e:
+            logger.warning(f"Error releasing lock: {e}")
+        finally:
+            _lock_file_handle = None
 
 
 # =============================================================================
@@ -412,6 +462,15 @@ def main():
     config_file = sys.argv[1]
     logger.info(f"Loading configuration from {config_file}")
     config = load_config(config_file)
+
+    # Acquire lock to prevent parallel execution
+    if not acquire_lock():
+        print("\nStatus: ERROR")
+        print("Another instance is already running")
+        sys.exit(1)
+
+    # Register lock release on exit
+    atexit.register(release_lock)
 
     logger.info("Starting RabbitMQ Retry Checker")
     success = run(config)
